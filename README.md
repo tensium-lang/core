@@ -6,6 +6,8 @@ An agent-native programming language. Strict, self-checking, compiles to TypeScr
 
 This repo is a **minimal proof of concept** for one thesis: agents write more correct code, faster, when the toolchain gives strict enforcement and *structured, machine-readable diagnostics* instead of prose errors.
 
+What the experiments have found so far is in [RESULTS.md](RESULTS.md); the thesis itself is in [thesis.md](thesis.md).
+
 ## Setup
 
 ```
@@ -45,7 +47,7 @@ Each diagnostic: `{ code, severity, message, span: {file, startLine, startCol, e
 
 In the language: a `.tn` file with no top comment doesn't compile (TN4001), and a placeholder or tiny one doesn't either (TN4002). The suggested fix inserts a `// TODO ...` placeholder on purpose, so it still fails until a real explanation is written. The comment is copied to the top of the generated TypeScript. In this repo: `test/headers.test.ts` fails if any file (except JSON and lock files, which can't hold comments) lacks one.
 
-Null narrowing supports `if (x !== null)`, `if (x === null) { return …; }` (rest of block), `&&`/`||`, and else-branches.
+Null narrowing supports `if (x !== null)`, `if (x === null) { return …; }` (rest of block), `&&`/`||`, and else-branches, on plain names and on field paths such as `c.email`.
 The parser recovers from errors, so one check reports everything it can find.
 
 ## The client/server boundary

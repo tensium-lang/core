@@ -18,9 +18,18 @@ class Var {
 
 class Scope {
   vars = new Map<string, Var>();
+  /** Field paths such as "c.email" that a null check has proven non-null in this scope. */
+  narrowedPaths = new Set<string>();
   constructor(public parent?: Scope) {}
   lookup(name: string): Var | undefined {
     return this.vars.get(name) ?? this.parent?.lookup(name);
+  }
+  /** Bindings and records never change, so a checked field stays non-null until its root name is rebound. */
+  pathNarrowed(path: string): boolean {
+    if (this.narrowedPaths.has(path)) return true;
+    const root = this.vars.get(path.split('.')[0]);
+    if (root && !root.orig) return false; // a different variable with the same name starts here
+    return this.parent?.pathNarrowed(path) ?? false;
   }
   names(): string[] {
     return [...this.vars.keys(), ...(this.parent?.names() ?? [])];
@@ -71,6 +80,14 @@ const nearestField = (name: string, cands: string[]): string | undefined => {
 
 type Narrow = { t: string[]; f: string[] };
 
+/** `x` or `x.a.b`: the things a null check can vouch for. */
+function pathOf(e: Expr): string | null {
+  if (e.kind === 'Ident') return e.name;
+  if (e.kind !== 'Field') return null;
+  const base = pathOf(e.obj);
+  return base === null ? null : `${base}.${e.name}`;
+}
+
 function narrowings(e: Expr): Narrow {
   const none: Narrow = { t: [], f: [] };
   if (e.kind === 'Unary' && e.op === '!') { const n = narrowings(e.expr); return { t: n.f, f: n.t }; }
@@ -78,10 +95,9 @@ function narrowings(e: Expr): Narrow {
   if (e.op === '&&') return { t: [...narrowings(e.left).t, ...narrowings(e.right).t], f: [] };
   if (e.op === '||') return { t: [], f: [...narrowings(e.left).f, ...narrowings(e.right).f] };
   if (['!==', '!=', '===', '=='].includes(e.op)) {
-    const id = e.left.kind === 'Ident' && e.right.kind === 'Null' ? e.left
-      : e.right.kind === 'Ident' && e.left.kind === 'Null' ? e.right : null;
-    if (!id || id.kind !== 'Ident') return none;
-    return e.op.startsWith('!') ? { t: [id.name], f: [] } : { t: [], f: [id.name] };
+    const path = e.right.kind === 'Null' ? pathOf(e.left) : e.left.kind === 'Null' ? pathOf(e.right) : null;
+    if (path === null) return none;
+    return e.op.startsWith('!') ? { t: [path], f: [] } : { t: [], f: [path] };
   }
   return none;
 }
@@ -325,6 +341,7 @@ class Checker {
 
   // ---- blocks and statements
   narrow(scope: Scope, name: string): void {
+    if (name.includes('.')) { scope.narrowedPaths.add(name); return; }
     const v = scope.lookup(name);
     if (v && v.ty.k === 'nullable') scope.vars.set(name, new Var(name, v.ty.inner, v.loc, false, v));
   }
@@ -578,7 +595,9 @@ class Checker {
         expected: E, actual: A,
         fix: expected.k === 'boolean' && actual.inner.k !== 'boolean'
           ? { description: `Compare explicitly: ${text} !== null`, edit: { loc: e.loc, newText: `${text} !== null` } }
-          : { description: `Check for null first: if (${text} !== null) { ... } (or compare with === null and return early)` },
+          : pathOf(e) !== null
+            ? { description: `Check for null first: if (${text} !== null) { ... } (or compare with === null and return early)` }
+            : { description: `Give the value a name, then check it: let value = ${text}; if (value !== null) { ... }` },
       });
     } else if (expected.k === 'result' && actual.k !== 'result' && actual.k !== 'unknown' && assignable(actual, expected.ok)) {
       this.err('TN0002', `Type '${A}' is not assignable to type '${E}'; a success value must be wrapped in ok(...).`, e.loc, {
@@ -717,6 +736,9 @@ class Checker {
       });
       return T.unknown;
     }
+    // `if (c.email !== null)` has already been checked on this path
+    const path = pathOf(e);
+    if (f[1].k === 'nullable' && path !== null && scope.pathNarrowed(path)) return f[1].inner;
     return f[1];
   }
 

@@ -54,6 +54,21 @@ test('records: null fields must be checked, and string.length points at len()', 
   assert.deepEqual(codes(USER + 'fn f(u: User): number { return len(u.email); }'), ['TN3002']);
   assert.deepEqual(codes(USER + 'fn f(u: User): number { let e = u.email; if (e === null) { return 0; } return len(e); }'), []);
   assert.deepEqual(codes(USER + 'fn f(u: User | null): number { return u.id; }'), ['TN3002']);
+  // a null check on a field path counts, in every form a check on a plain name does
+  assert.deepEqual(codes(USER + 'fn f(u: User): number { if (u.email === null) { return 0; } return len(u.email); }'), []);
+  assert.deepEqual(codes(USER + 'fn f(u: User): number { if (u.email == null) { return 0; } return len(u.email); }'), []);
+  assert.deepEqual(codes(USER + 'fn f(u: User): number { if (u.email !== null) { return len(u.email); } return 0; }'), []);
+  assert.deepEqual(codes(USER + 'fn f(u: User): number { return if (u.email !== null) { len(u.email) } else { 0 }; }'), []);
+  assert.deepEqual(codes(USER + 'fn f(u: User): boolean { return u.email !== null && len(u.email) > 3; }'), []);
+  assert.deepEqual(codes('type A = { u: ' + 'B | null }\ntype B = { n: string | null }\nfn f(a: A): number { if (a.u === null) { return 0; } if (a.u.n === null) { return 1; } return len(a.u.n); }'), []);
+  // ...but not for a different record, the other branch, or a new variable that reuses the name
+  assert.deepEqual(codes(USER + 'fn f(u: User, v: User): number { if (u.email === null) { return 0; } return len(v.email); }'), ['TN3002']);
+  assert.deepEqual(codes(USER + 'fn f(u: User): number { if (u.email !== null) { return 0; } return len(u.email); }'), ['TN3002']);
+  assert.deepEqual(codes(USER + 'fn mk(): User { return { id: 1, name: "a", email: null }; }\nfn f(r: Result<User, string>, u: User): number { if (u.email === null) { return 0; } return match r { ok(u) => len(u.email), err(e) => 0 }; }'), ['TN3002']);
+  // a call result is not a path: the advice is to name it first
+  const [named] = diags(USER + 'fn mk(): User { return { id: 1, name: "a", email: null }; }\nfn f(): number { return len(mk().email); }');
+  assert.equal(named.code, 'TN3002');
+  assert.match(named.suggestedFix!.description, /Give the value a name/);
   const [d] = diags('fn f(s: string): number { return s.length; }');
   assert.equal(d.code, 'TN0002');
   assert.equal(d.suggestedFix!.edit!.newText, 'len(s)');

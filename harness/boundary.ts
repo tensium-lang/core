@@ -312,9 +312,9 @@ function drift(): void {
     const s = appFiles('ts-shared', server);
     return { 'types.ts': s['types.ts'], 'server.ts': s['server.ts'], 'client.ts': appFiles('ts-shared', client)['client.ts'] };
   };
-  const tsEdit = (arm: Arm, from: 'starter' | string, edit: (client: string) => string): Files => {
+  const tsEdit = (arm: Arm, from: 'starter' | string, edit: (text: string) => string, file = 'client.ts'): Files => {
     const f = appFiles(arm, from);
-    return { ...f, 'client.ts': edit(f['client.ts']) };
+    return { ...f, [file]: edit(f[file]) };
   };
   const starterTn = appFiles('tn', 'starter')['app.tn'];
   const couponTn = appFiles('tn', '05-coupon')['app.tn'];
@@ -356,6 +356,18 @@ export async function receiptIsValid(productId: number, quantity: number, custom
 `),
     },
   ];
+  // the mistake helpers actually made in run b1: four of six did this
+  cases.push({
+    name: 'server answers with a bare true/false; client expects an ok/err Result', task: '07-verify-receipt',
+    files: (arm) => arm === 'tn'
+      ? { 'app.tn': swap(swap(swap(appFiles('tn', '07-verify-receipt')['app.tn'],
+          'signature: string): Result<boolean, string> {', 'signature: string): boolean {'),
+          'ok(r) => { return ok(r.signature == signature); }', 'ok(r) => { return r.signature == signature; }'),
+          '    err(e) => { return err(e); }\n  }\n}\n\n// ---- client', '    err(e) => { return false; }\n  }\n}\n\n// ---- client') }
+      : tsEdit(arm, '07-verify-receipt', (t) => swap(t,
+          "): Result<boolean, string> {\n  const receipt = checkout(productId, quantity, customerId);\n  if (!receipt.ok) return receipt;\n  return ok(receipt.value.signature === signature);",
+          "): boolean {\n  const receipt = checkout(productId, quantity, customerId);\n  return receipt.ok && receipt.value.signature === signature;"), 'server.ts'),
+  });
   const lines = ['| planted mistake | arm | its compiler says | hidden end-to-end tests |', '|---|---|---|---|'];
   for (const [i, c] of cases.entries()) for (const arm of ARMS) {
     const dir = join(scratch, `m${i + 1}__${arm}`);
