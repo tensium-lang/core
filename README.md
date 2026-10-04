@@ -91,7 +91,29 @@ Renaming a field in a shared type flags every stale use on both sides in one che
 
 Limits of this version: calls run one after another (no parallel server calls); the error type across the boundary is fixed to `string`; no effect tracking beyond the server/client marker; server-only builtins are just `secret` and `sign`.
 
-## The experiment
+## Experiment 2: the client/server boundary
+
+Question: when an agent changes a two-sided app, does a compiler that guards the boundary stop it shipping an app whose halves disagree?
+
+- **App:** a small shop (`examples/shop.tn`; TypeScript mirror in `harness/boundary/app/ts/`), with products, customers, quotes and signed receipts.
+- **Arms:** `tn` (Tensium, one file, Tensium compiler), `ts-shared` (TypeScript, server and client import one `types.ts`, `tsc --strict`), `ts-split` (TypeScript, each side has its own copy of the types, `tsc --strict`). The split variant is generated from the shared one.
+- **Tasks:** 7 change requests in `harness/boundary/tasks/NN-name/` (`ticket.md`, hidden `tests.ts`, a reference `solution/` per arm): rename a field, split a field, add a field, change a field's type, add an argument, make a field nullable, add a feature that must not leak the signing key.
+- **Scoring:** the hidden tests start the real server, drive the client over HTTP, check every line of output and the wire format, and (for the last task) scan the client code for the secret.
+
+```
+npx tsx harness/boundary.ts verify      # no agents: starter + every reference solution, in every arm (about 30 s)
+npx tsx harness/boundary.ts drift       # no agents: plant three one-sided mistakes in every arm; which compiler notices?
+npx tsx harness/boundary.ts init --run b1 [--arms tn,ts-shared,ts-split] [--trials 1] [--max-iter 6] [--tasks id,id] [--note TEXT]
+#   -> runs/b1/<task>__<arm>__t<k>/TASK.md; hand each to a fresh agent, which edits the app and calls:
+#      npx tsx harness/boundary.ts submit <workdir>     (feedback from that arm's own compiler)
+npx tsx harness/boundary.ts score b1    # hidden end-to-end tests on each final submission -> runs/b1/report.md
+```
+
+The key number is **clean but broken**: runs whose final submission passed its own compiler and still failed the hidden tests.
+
+Caveat: the Tensium arm also carries an unfamiliar language, so this compares whole stacks, not one variable.
+
+## Experiment 1: feedback format
 
 Question: given the same task, language and model, does the *format* of compiler feedback change iterations-to-correct and final correctness?
 
