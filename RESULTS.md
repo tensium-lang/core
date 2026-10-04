@@ -124,4 +124,82 @@ The original task, unchanged, 4 more trials per arm (12 runs):
 - **Only this one shape repeated.** The other shapes I predicted Tensium would protect against (lenient parsing, a stale yes/no check, a null behind a cast) produced nothing: TypeScript agents simply wrote them correctly. Those predictions were wrong about agents, even though the compilers behave as predicted on the planted versions.
 - **Where neither compiler helps, nothing broke either.** Tasks 06, 09 and 10 were ties at zero.
 - **Unexplained:** Tensium agents wrote the bare-value version far more often than TypeScript agents did (11 of 12 against 8 of 24). I have not tested why. It means the benefit is that the mistake cannot ship, not that it is made less often.
-- **Limits:** one model, one small app, 2 trials per cell, and a TypeScript starter that does not say in a comment that every server function must return a Result. A one-line comment or a typed route table might remove most of the TypeScript failures; that has not been tested.
+- **Limits:** one model, one small app, 2 trials per cell, and a TypeScript starter that does not say in a comment that every server function must return a Result. A one-line comment or a typed route table might remove most of the TypeScript failures; that had not been tested when this was written. It was tested next: see Experiment 4b, where both removed all of them.
+
+## Experiment 4b: can plain TypeScript be given the same protection cheaply?
+
+**Outcome, stated first: the comment fixes it.** One line of English above the route table took TypeScript from 6 broken runs of 12 to 0 of 12. The typed route table also gave 0 of 12. By the rule written down before the run, this means the Experiment 4 finding does not justify a new language, and does not even justify a type helper.
+
+The two baselines, the predictions and the rule for reading the result were frozen in commit `8dd44a1` before any agent ran (`harness/silent/PREREGISTRATION-4b.md`). Tasks 01–03, their hidden tests, the starter and the Tensium checker are unchanged from Experiment 4. Nothing was changed afterwards and no task was re-run.
+
+Setup: tasks 01–03 × 7 arms × 2 trials = 42 runs, Haiku 4.5, at most 6 submissions. Each baseline is one change to the TypeScript starter's `server.ts`:
+
+- **(A) comment:** `// Convention: every function the client can call must return a Result (ok(...) or err(...)), never a bare value.` directly above the route table. `tsc` still accepts a bare value.
+- **(B) typed route table:** `type ServerHandler = (args: any[]) => Result<unknown, string>;` and `const routes: Record<string, ServerHandler>`. No comment. `tsc --strict` now rejects a bare-value route (TS2322 on all three planted versions, checked with no model).
+
+The plain TypeScript arms and Tensium were run again the same day as a control. Shared-types and split-types runs are added together.
+
+### Headline: clean but broken
+
+| arm | runs | compiler-clean | correct | **clean but broken** | clean on 1st submit | mean submissions |
+|---|---|---|---|---|---|---|
+| TypeScript, plain (control) | 12 | 12 | 6 | **6** | 12 | 1.0 |
+| (A) TypeScript + comment | 12 | 12 | 12 | **0** | 12 | 1.0 |
+| (B) TypeScript + typed route table | 12 | 12 | 12 | **0** | 12 | 1.0 |
+| Tensium (control) | 6 | 6 | 6 | **0** | 0 | 2.0 |
+
+Rough guide only: each baseline's 0 of 12 against the control's 6 of 12 gives a Fisher exact p of 0.007 one-sided (0.014 two-sided).
+
+| task | plain | (A) comment | (B) typed | Tensium |
+|---|---|---|---|---|
+| 01-coupon-check | 1 of 4 | 0 of 4 | 0 of 4 | 0 of 2 |
+| 02-loyalty-points | 4 of 4 | 0 of 4 | 0 of 4 | 0 of 2 |
+| 03-store-notice | 1 of 4 | 0 of 4 | 0 of 4 | 0 of 2 |
+
+**The control repeated Experiment 4 exactly**: 6 of 12, with the same count on each task (1, 4, 1). So the zeros are not a good day. All six broken runs are the bare-value return again. Across both experiments plain TypeScript has now shipped this bug in 12 of 24 runs on these three tasks, and in 8 of 8 on the points task.
+
+### What the agents wrote
+
+Read from the final `server.ts` of every TypeScript run, and from the attempt logs.
+
+| arm | function returns a Result | function returns a bare value, route wraps it in `ok(...)` | bare value reaches the client |
+|---|---|---|---|
+| TypeScript, plain | 6 | 0 | 6 (all shipped) |
+| (A) comment | 11 | 1 | 0 |
+| (B) typed route table | 9 | 3 | 0 |
+| Tensium, first submission | 0 | – | 6 (all rejected by TN5006, all fixed on the second) |
+
+- **The type in (B) never fired.** Not one of the 12 typed runs had a submission rejected: no TS2322, every run clean and correct first time. The agents read `ServerHandler` and complied. So in this experiment the type worked as a hint, exactly like the comment, and its power as a check was never used. Nothing here tests whether enforcement in TypeScript holds when an agent runs into it.
+- **Nobody went around it.** No cast, no `@ts-` comment, no edit to `ServerHandler` or to the route table's type in any (B) run. The comment line was still there in every (A) run.
+- **Tensium** was the only arm where the mistake was made and then stopped: 6 of 6 wrote the bare value first, as in Experiment 4.
+
+### Predictions against outcome
+
+Mine (Claude's), written before the run. Jay had given none.
+
+| arm | predicted clean but broken | got | |
+|---|---|---|---|
+| plain TypeScript | 4 of 12 (2 to 8) | 6 of 12 | in range |
+| (A) comment | 0 of 12 | 0 of 12 | right |
+| (B) typed route table | 0 of 12, with 2 to 4 runs stopped by TS2322 first | 0 of 12, with 0 stopped | right on the headline, wrong on how: no run needed the check |
+| Tensium | 0 of 6, with 5 or 6 stopped by TN5006 first | 0 of 6, with 6 stopped | right |
+
+### What each outcome would have meant, and which one this is
+
+| outcome | rule | new language, or type helper? |
+|---|---|---|
+| **The comment fixes it** ← this one | (A) ships 0 of 12, against a control of 3 or more | The finding was a convention the starter did not state. One line of English removes it. It does not justify a new language or a type helper. |
+| Only the wrapper fixes it | (A) ships 1 or more, (B) ships 0 | Enforcement beats convention, but a two-line TypeScript type is enough for this bug; a language would have to earn its place by being on by default and having no cast around it. |
+| Neither fixes it | both ship 1 or more | Agents got past a type helper; the strongest case for a checker with no escape hatch, for this one bug shape. |
+
+### What this does and does not show
+
+- **Experiment 4's finding stands as measured and shrinks in meaning.** Plain `tsc --strict` does ship this bug half the time on these tasks, and Tensium does stop it every time. But the bug is there because nobody told the agent the rule. Tell it in one line and it is gone, 12 of 12, with no extra submissions.
+- **This is evidence against needing Tensium for this bug.** It is the one place so far where Tensium beat TypeScript on correctness, and a comment matches it. Every TypeScript failure in every agent run in this notebook is this one bug, so there is no agent result left where Tensium ends up more correct than TypeScript with a sensible starter.
+- **Tensium cost a submission every time.** 2.0 submissions against 1.0 in every TypeScript arm. Part of that is my setup: the Tensium language sheet given to agents shows a server function returning a Result but never states the rule either. So the like-for-like pair is "not told": Tensium 0 of 6 shipped, plain TypeScript 6 of 12 shipped. The comment arm is "told", and there is no "Tensium, told" arm. I expect one line in the language sheet would remove most of the first-submission rejections; that is not tested.
+- **"Enforcement beats convention" got no support here, and no fair test.** The convention won without help. But this was the easiest case for a comment: one rule, in a file of about 100 lines, placed on the exact line every agent had to edit. Whether a comment still works among fifty conventions in a large codebase, where the agent may never read the file that states it, is the question a compiler rule is meant to answer, and this experiment does not ask it.
+- **The check in (B) is untested as a check**, for the reason above. I cannot say from this run whether agents would cast around a type helper when it gets in the way.
+
+The bare-value mistake across everything run so far: plain TypeScript shipped it in 14 of 36 runs; TypeScript with the comment or the typed table, 0 of 24; Tensium wrote it first in 17 of 18 runs and shipped it in 0.
+
+**Limits:** 12 runs per arm, one model, one small app, three tasks that were picked because TypeScript failed them. The arm's name is visible in the work directory's path (`...__ts-shared-comment__t1`), so the runs were not blind to which arm they were in; I do not think that name tells an agent what to write. The scope limit from Experiment 4 holds: this is about one bug shape and says nothing about correctness overall.
