@@ -1,0 +1,174 @@
+// A small shop app with two halves. The server half knows the products, the customers, the
+// prices and how many items each customer may order at once, and signs each receipt with a
+// secret key. The client half turns what the server sends into the lines of text a shopper sees.
+// Both halves share the same record types, so they can never disagree about what a Product or a
+// Customer looks like.
+
+type Product = { id: number, name: string, priceCents: number, inStock: boolean }
+type Customer = { id: number, name: string, email: string, tier: string }
+type Quote = { product: Product, quantity: number, discountPercent: number, totalCents: number }
+type Receipt = { customer: Customer, quote: Quote, signature: string }
+
+// ---- helpers (plain fns run on either side)
+
+fn twoDigits(n: number): string {
+  if (n < 10) { return "0" + str(n); }
+  return str(n);
+}
+
+fn formatCents(cents: number): string {
+  return "$" + str(floor(cents / 100)) + "." + twoDigits(cents % 100);
+}
+
+fn discountFor(tier: string): number {
+  if (tier == "gold") { return 20; }
+  if (tier == "silver") { return 10; }
+  return 0;
+}
+
+fn orderLimit(tier: string): number {
+  if (tier == "gold") { return 20; }
+  if (tier == "silver") { return 10; }
+  return 5;
+}
+
+fn withinLimit(quantity: number, tier: string): Result<number, string> {
+  let limit = orderLimit(tier);
+  if (quantity > limit) { return err("limit is " + str(limit) + " per order"); }
+  return ok(quantity);
+}
+
+fn discountNote(percent: number): string {
+  if (percent == 0) { return ""; }
+  return " (" + str(percent) + "% off)";
+}
+
+// ---- server
+
+server fn getProduct(id: number): Result<Product, string> {
+  if (id == 1) { return ok({ id: 1, name: "Widget", priceCents: 1250, inStock: true }); }
+  if (id == 2) { return ok({ id: 2, name: "Gadget", priceCents: 9999, inStock: false }); }
+  if (id == 3) { return ok({ id: 3, name: "Gizmo", priceCents: 500, inStock: true }); }
+  return err("no such product");
+}
+
+server fn getCustomer(id: number): Result<Customer, string> {
+  if (id == 1) { return ok({ id: 1, name: "Ann Lee", email: "ann@example.com", tier: "gold" }); }
+  if (id == 2) { return ok({ id: 2, name: "Bo Chen", email: "bo@example.com", tier: "silver" }); }
+  if (id == 3) { return ok({ id: 3, name: "Cy Young", email: "cy@example.com", tier: "basic" }); }
+  return err("no such customer");
+}
+
+server fn getQuote(productId: number, quantity: number, customerId: number): Result<Quote, string> {
+  if (quantity < 1) { return err("quantity must be at least 1"); }
+  match getProduct(productId) {
+    ok(product) => {
+      match getCustomer(customerId) {
+        ok(customer) => {
+          if (!product.inStock) { return err("out of stock"); }
+          match withinLimit(quantity, customer.tier) {
+            ok(allowed) => {}
+            err(e) => { return err(e); }
+          }
+          let discount = discountFor(customer.tier);
+          let full = product.priceCents * quantity;
+          let total = full - floor(full * discount / 100);
+          return ok({ product: product, quantity: quantity, discountPercent: discount, totalCents: total });
+        }
+        err(e) => { return err(e); }
+      }
+    }
+    err(e) => { return err(e); }
+  }
+}
+
+server fn availability(productId: number, quantity: number, customerId: number): Result<string, string> {
+  match getProduct(productId) {
+    ok(product) => {
+      match getCustomer(customerId) {
+        ok(customer) => {
+          if (!product.inStock) { return ok("sold out"); }
+          if (!withinLimit(quantity, customer.tier)) { return ok("over the limit"); }
+          return ok("available");
+        }
+        err(e) => { return err(e); }
+      }
+    }
+    err(e) => { return err(e); }
+  }
+}
+
+server fn checkout(productId: number, quantity: number, customerId: number): Result<Receipt, string> {
+  match getQuote(productId, quantity, customerId) {
+    ok(quote) => {
+      match getCustomer(customerId) {
+        ok(customer) => {
+          let key = secret("SIGNING_KEY");
+          let signature = sign(key, str(customer.id) + ":" + str(quote.product.id) + ":" + str(quote.totalCents));
+          return ok({ customer: customer, quote: quote, signature: signature });
+        }
+        err(e) => { return err(e); }
+      }
+    }
+    err(e) => { return err(e); }
+  }
+}
+
+// ---- client
+
+client fn productLabel(id: number): string {
+  match getProduct(id) {
+    ok(p) => {
+      if (p.inStock) { return p.name + " - " + formatCents(p.priceCents); }
+      return p.name + " - " + formatCents(p.priceCents) + " (sold out)";
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn canBuy(productId: number): boolean {
+  match getProduct(productId) {
+    ok(p) => { return p.inStock; }
+    err(e) => { return false; }
+  }
+}
+
+client fn greeting(customerId: number): string {
+  match getCustomer(customerId) {
+    ok(c) => { return "Hello, " + c.name + " (" + c.tier + ")"; }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn contactLine(customerId: number): string {
+  match getCustomer(customerId) {
+    ok(c) => { return c.name + " <" + c.email + ">"; }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn quoteSummary(productId: number, quantity: number, customerId: number): string {
+  match getQuote(productId, quantity, customerId) {
+    ok(q) => {
+      return str(q.quantity) + " x " + q.product.name + " = " + formatCents(q.totalCents) + discountNote(q.discountPercent);
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn availabilityText(productId: number, quantity: number, customerId: number): string {
+  match availability(productId, quantity, customerId) {
+    ok(status) => { return status; }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn receiptText(productId: number, quantity: number, customerId: number): string {
+  match checkout(productId, quantity, customerId) {
+    ok(r) => {
+      return "Receipt for " + r.customer.name + ": " + str(r.quote.quantity) + " x " + r.quote.product.name
+        + ", total " + formatCents(r.quote.totalCents) + " [" + r.signature + "]";
+    }
+    err(e) => { return "error: " + e; }
+  }
+}

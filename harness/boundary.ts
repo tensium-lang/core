@@ -1,18 +1,21 @@
 #!/usr/bin/env -S npx tsx
-// This file runs the second experiment: does a compiler that guards the line between client and
-// server help a computer helper change a two-sided app without breaking it? Each helper gets the
+// This file runs the experiments on two-sided apps: does a compiler that guards the line between
+// client and server help a computer helper change an app without breaking it? Each helper gets the
 // same small shop app and the same change request, written either in Tensium (one file, checked
 // by the Tensium compiler) or in ordinary TypeScript (separate server and client files, checked
-// by tsc). Secret end-to-end tests then decide whether the app still works.
+// by tsc). Secret end-to-end tests then decide whether the app still works. There are two sets of
+// change requests ("suites"): boundary (Experiment 2) and silent (Experiment 4: changes where the
+// easy version passes the TypeScript checker but gives wrong answers).
 //
 // No model calls happen here: helpers are driven from outside. This tool only sets up folders,
 // gives compiler feedback, logs attempts and scores them.
 //
-//   init   --run ID [--arms tn,ts-shared,ts-split] [--trials N] [--max-iter N] [--tasks a,b] [--note TEXT]
+//   init   --run ID [--suite boundary|silent] [--arms tn,ts-shared,ts-split] [--trials N] [--max-iter N] [--tasks a,b] [--note TEXT]
 //   submit <workdir>      check the app, log the attempt, print the compiler's feedback
 //   score  <run ID>       run the hidden end-to-end tests on each final attempt and print the table
-//   verify                no helpers: check the starter app and the reference solutions in every arm
-//   drift                 no helpers: plant three classic client/server mistakes in every arm and see which compiler notices
+//   verify [--suite S]    no helpers: check the starter app and the reference solutions in every arm
+//   drift                 no helpers: plant classic client/server mistakes in every arm (boundary suite) and see which compiler notices
+//   traps  [--suite S]    no helpers: run each task's tempting-but-wrong version through every arm's compiler and the hidden tests
 
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -22,23 +25,36 @@ import { compile, toJSON } from '../src/index.ts';
 import { languageReference } from './language.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const B = join(ROOT, 'harness', 'boundary');
-const TASKS = join(B, 'tasks');
 const RUNS = join(ROOT, 'runs');
+
+/** A suite is one starter app plus its set of change requests. */
+type Suite = 'boundary' | 'silent';
+const SUITES: Record<Suite, { dir: string; tnStarter: string }> = {
+  boundary: { dir: join(ROOT, 'harness', 'boundary'), tnStarter: join(ROOT, 'examples', 'shop.tn') },
+  silent: { dir: join(ROOT, 'harness', 'silent'), tnStarter: join(ROOT, 'harness', 'silent', 'app', 'app.tn') },
+};
+let suite: Suite = 'boundary';
+function useSuite(name: string | undefined): void {
+  const s = (name ?? 'boundary') as Suite;
+  if (!SUITES[s]) throw new Error(`unknown suite ${name}; use ${Object.keys(SUITES).join(', ')}`);
+  suite = s;
+}
+const B = () => SUITES[suite].dir;
+const TASKS = () => join(B(), 'tasks');
 const TEST_KEY = 'test-signing-key-7f3a';
 
 /** tn = Tensium; ts-shared = TypeScript with one shared types file; ts-split = TypeScript where each side has its own copy of the types. */
 type Arm = 'tn' | 'ts-shared' | 'ts-split';
 const ARMS: Arm[] = ['tn', 'ts-shared', 'ts-split'];
 type Files = Record<string, string>;
-interface Meta { runId: string; task: string; arm: Arm; trial: number; maxIter: number }
+interface Meta { runId: string; task: string; arm: Arm; trial: number; maxIter: number; suite?: Suite }
 interface Attempt { n: number; at: string; ok: boolean; errors: number; codes: string[]; dir: string }
 
 const argv = process.argv.slice(2);
 const opt = (name: string, dflt?: string) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : dflt; };
 const readJSON = <T>(p: string): T => JSON.parse(readFileSync(p, 'utf8'));
 const read = (p: string) => readFileSync(p, 'utf8');
-const taskIds = () => readdirSync(TASKS).filter((t) => existsSync(join(TASKS, t, 'ticket.md'))).sort();
+const taskIds = () => readdirSync(TASKS()).filter((t) => existsSync(join(TASKS(), t, 'ticket.md'))).sort();
 
 // ---- the app in each arm
 
@@ -54,9 +70,10 @@ function splitFrom(shared: Files): Files {
   return { 'server.ts': inline(shared['server.ts']), 'client.ts': inline(shared['client.ts']) };
 }
 
-function appFiles(arm: Arm, from: 'starter' | string): Files {
-  if (arm === 'tn') return { 'app.tn': read(from === 'starter' ? join(ROOT, 'examples', 'shop.tn') : join(TASKS, from, 'solution', 'app.tn')) };
-  const dir = from === 'starter' ? join(B, 'app', 'ts') : join(TASKS, from, 'solution');
+/** The app in one arm: the starter, or a task's reference solution, or a task's tempting-but-wrong version ('trap'). */
+function appFiles(arm: Arm, from: 'starter' | string, variant: 'solution' | 'trap' = 'solution'): Files {
+  if (arm === 'tn') return { 'app.tn': read(from === 'starter' ? SUITES[suite].tnStarter : join(TASKS(), from, variant, 'app.tn')) };
+  const dir = from === 'starter' ? join(B(), 'app', 'ts') : join(TASKS(), from, variant);
   const shared: Files = Object.fromEntries(['types.ts', 'server.ts', 'client.ts'].map((f) => [f, read(join(dir, f))]));
   return arm === 'ts-shared' ? shared : splitFrom(shared);
 }
@@ -156,21 +173,22 @@ function init(): void {
   for (const a of arms) if (!ARMS.includes(a)) throw new Error(`unknown arm ${a}; use ${ARMS.join(', ')}`);
   const trials = Number(opt('--trials', '1'));
   const maxIter = Number(opt('--max-iter', '6'));
+  useSuite(opt('--suite'));
   const only = opt('--tasks')?.split(',');
   const tasks = taskIds().filter((t) => !only || only.includes(t));
   const runDir = join(RUNS, runId);
   mkdirSync(runDir, { recursive: true });
   const langPath = join(runDir, 'LANGUAGE.md');
   writeFileSync(langPath, languageReference('terse'));
-  writeFileSync(join(runDir, 'NOTE.txt'), `boundary experiment; arms: ${arms.join(', ')}${opt('--note') ? `; ${opt('--note')}` : ''}\n`);
+  writeFileSync(join(runDir, 'NOTE.txt'), `suite: ${suite}; arms: ${arms.join(', ')}${opt('--note') ? `; ${opt('--note')}` : ''}\n`);
   const dirs: string[] = [];
   for (const task of tasks) for (const arm of arms) for (let trial = 1; trial <= trials; trial++) {
     const dir = join(runDir, `${task}__${arm}__t${trial}`);
     mkdirSync(dir, { recursive: true });
-    const meta: Meta = { runId, task, arm, trial, maxIter };
+    const meta: Meta = { runId, task, arm, trial, maxIter, suite };
     writeFileSync(join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
     for (const [name, text] of Object.entries(appFiles(arm, 'starter'))) writeFileSync(join(dir, name), text);
-    const ticket = read(join(TASKS, task, 'ticket.md')).replace(/^<!--[\s\S]*?-->\s*/, '');
+    const ticket = read(join(TASKS(), task, 'ticket.md')).replace(/^<!--[\s\S]*?-->\s*/, '');
     writeFileSync(join(dir, 'TASK.md'), brief(dir, meta, ticket, langPath));
     dirs.push(dir);
   }
@@ -189,6 +207,7 @@ function submit(): void {
   const dir = resolve(argv[1] ?? '');
   if (!existsSync(join(dir, 'meta.json'))) { console.error(`not a work directory: ${dir}`); process.exit(2); }
   const meta = readJSON<Meta>(join(dir, 'meta.json'));
+  useSuite(meta.suite);
   const attempts = attemptsOf(dir);
   if (attempts.some((a) => a.ok)) { console.log('Already submitted successfully; nothing more to do.'); return; }
   if (attempts.length >= meta.maxIter) { console.log(`Iteration limit (${meta.maxIter}) reached; no further submissions accepted.`); return; }
@@ -225,6 +244,7 @@ function score(): void {
   let maxIter = 0;
   for (const dir of readJSON<string[]>(join(runDir, 'workdirs.json'))) {
     const meta = readJSON<Meta>(join(dir, 'meta.json'));
+    useSuite(meta.suite);
     maxIter = meta.maxIter;
     const attempts = attemptsOf(dir);
     const last = attempts[attempts.length - 1];
@@ -233,7 +253,7 @@ function score(): void {
       firstTryClean: !!attempts[0]?.ok, codes: attempts.flatMap((a) => a.codes),
     };
     if (last?.ok) {
-      const r = e2e(join(dir, last.dir), meta.arm, join(TASKS, meta.task, 'tests.ts'));
+      const r = e2e(join(dir, last.dir), meta.arm, join(TASKS(), meta.task, 'tests.ts'));
       row.correct = r.ok;
       row.testError = r.error;
     } else row.testError = last ? 'never passed its own compiler' : 'no submission';
@@ -266,7 +286,8 @@ function score(): void {
 // ---- verify (no helpers): the starter passes the baseline, fails every task's tests, and each reference solution passes
 
 function verify(): void {
-  const scratch = join(RUNS, '_verify');
+  useSuite(opt('--suite'));
+  const scratch = join(RUNS, `_verify_${suite}`);
   let failures = 0;
   const place = (name: string, files: Files) => {
     const dir = join(scratch, name);
@@ -282,10 +303,10 @@ function verify(): void {
   for (const arm of ARMS) {
     const starter = place(`starter__${arm}`, appFiles(arm, 'starter'));
     expect(`${arm}: starter passes its compiler`, check(starter, arm).ok, true);
-    const base = e2e(starter, arm, join(B, 'baseline.tests.ts'));
+    const base = e2e(starter, arm, join(B(), 'baseline.tests.ts'));
     expect(`${arm}: starter passes the baseline tests`, base.ok, true, base.error);
     for (const task of taskIds()) {
-      const tests = join(TASKS, task, 'tests.ts');
+      const tests = join(TASKS(), task, 'tests.ts');
       expect(`${arm}: starter does NOT already pass ${task}`, e2e(starter, arm, tests).ok, false);
       const sol = place(`${task}__${arm}`, appFiles(arm, task));
       const c = check(sol, arm);
@@ -301,6 +322,7 @@ function verify(): void {
 // ---- drift (no helpers): plant a mistake that touches only one side, and see who notices
 
 function drift(): void {
+  useSuite('boundary');
   const scratch = join(RUNS, '_drift');
   const swap = (text: string, old: string, neu: string, times = 1): string => {
     if (text.split(old).length - 1 !== times) throw new Error(`expected ${times} of: ${old}`);
@@ -375,11 +397,33 @@ export async function receiptIsValid(productId: number, quantity: number, custom
     for (const [f, text] of Object.entries(c.files(arm))) writeFileSync(join(dir, f), text);
     const r = check(dir, arm);
     const verdict = r.ok ? 'OK (not noticed)' : `rejected: ${[...new Set(r.codes)].join(', ')}`;
-    const tests = r.ok ? e2e(dir, arm, join(TASKS, c.task, 'tests.ts')) : null;
+    const tests = r.ok ? e2e(dir, arm, join(TASKS(), c.task, 'tests.ts')) : null;
     lines.push(`| ${c.name} | ${arm} | ${verdict} | ${tests === null ? 'never ships' : tests.ok ? 'pass' : `FAIL: ${tests.error}`} |`);
   }
   const report = lines.join('\n');
   mkdirSync(scratch, { recursive: true });
+  writeFileSync(join(scratch, 'report.md'), report);
+  console.log(report);
+}
+
+// ---- traps (no helpers): each task's tempting-but-wrong version, through each arm's compiler and the hidden tests
+
+function traps(): void {
+  useSuite(opt('--suite', 'silent'));
+  const scratch = join(RUNS, `_traps_${suite}`);
+  const lines = ['| task | arm | its compiler says | hidden end-to-end tests |', '|---|---|---|---|'];
+  for (const task of taskIds()) {
+    if (!existsSync(join(TASKS(), task, 'trap'))) continue;
+    for (const arm of ARMS) {
+      const dir = join(scratch, `${task}__${arm}`);
+      mkdirSync(dir, { recursive: true });
+      for (const [f, text] of Object.entries(appFiles(arm, task, 'trap'))) writeFileSync(join(dir, f), text);
+      const r = check(dir, arm);
+      const tests = r.ok ? e2e(dir, arm, join(TASKS(), task, 'tests.ts')) : null;
+      lines.push(`| ${task} | ${arm} | ${r.ok ? 'accepted' : `rejected: ${[...new Set(r.codes)].join(', ')}`} | ${tests === null ? 'never ships' : tests.ok ? 'pass' : `FAIL: ${tests.error}`} |`);
+    }
+  }
+  const report = lines.join('\n');
   writeFileSync(join(scratch, 'report.md'), report);
   console.log(report);
 }
@@ -390,4 +434,5 @@ else if (cmd === 'submit') submit();
 else if (cmd === 'score') score();
 else if (cmd === 'verify') verify();
 else if (cmd === 'drift') drift();
-else { console.error('usage: init --run ID | submit <workdir> | score <run ID> | verify | drift'); process.exit(2); }
+else if (cmd === 'traps') traps();
+else { console.error('usage: init --run ID | submit <workdir> | score <run ID> | verify | drift | traps'); process.exit(2); }

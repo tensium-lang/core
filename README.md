@@ -103,9 +103,9 @@ Question: when an agent changes a two-sided app, does a compiler that guards the
 - **Scoring:** the hidden tests start the real server, drive the client over HTTP, check every line of output and the wire format, and (for the last task) scan the client code for the secret.
 
 ```
-npx tsx harness/boundary.ts verify      # no agents: starter + every reference solution, in every arm (about 30 s)
-npx tsx harness/boundary.ts drift       # no agents: plant three one-sided mistakes in every arm; which compiler notices?
-npx tsx harness/boundary.ts init --run b1 [--arms tn,ts-shared,ts-split] [--trials 1] [--max-iter 6] [--tasks id,id] [--note TEXT]
+npx tsx harness/boundary.ts verify [--suite boundary|silent]   # no agents: starter + every reference solution, in every arm
+npx tsx harness/boundary.ts drift       # no agents: plant one-sided mistakes in every arm; which compiler notices?
+npx tsx harness/boundary.ts init --run b1 [--suite boundary|silent] [--arms tn,ts-shared,ts-split] [--trials 1] [--max-iter 6] [--tasks id,id] [--note TEXT]
 #   -> runs/b1/<task>__<arm>__t<k>/TASK.md; hand each to a fresh agent, which edits the app and calls:
 #      npx tsx harness/boundary.ts submit <workdir>     (feedback from that arm's own compiler)
 npx tsx harness/boundary.ts score b1    # hidden end-to-end tests on each final submission -> runs/b1/report.md
@@ -114,6 +114,16 @@ npx tsx harness/boundary.ts score b1    # hidden end-to-end tests on each final 
 The key number is **clean but broken**: runs whose final submission passed its own compiler and still failed the hidden tests.
 
 Caveat: the Tensium arm also carries an unfamiliar language, so this compares whole stacks, not one variable.
+
+## Experiment 4: compiles under `tsc --strict`, silently wrong
+
+Question: was Experiment 2's one clear catch a fluke? Ten change requests (`harness/silent/tasks/`) on the same shop app, each with a natural implementation that `tsc --strict` accepts and that gives wrong answers: a server function returning a bare value where the client expects a Result, lenient parsing, a stale yes/no check, a missing-case lookup, a null hidden behind a cast, and three where no compiler can help. Same three arms and the same commands as Experiment 2, with `--suite silent`.
+
+```
+npx tsx harness/boundary.ts traps --suite silent    # no agents: each task's tempting-but-wrong version through every compiler and the hidden tests
+```
+
+The tasks, the predictions and the rules for reading the result were written down before any agent ran: `harness/silent/PREREGISTRATION.md`. The tasks were chosen to be hard for `tsc`, so a Tensium win only means "on bugs of this shape, Tensium catches what tsc ships".
 
 ## Experiment 1: feedback format
 
