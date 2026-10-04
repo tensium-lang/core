@@ -71,6 +71,12 @@ class Parser {
     return this.fail(`${what[0].toUpperCase()}${what.slice(1)} expected.`, t.loc, what, this.desc(t));
   }
 
+  /** The last location of a just-parsed statement: its ';' if there was one, else the end of its expression. */
+  endOfStmt(last: { loc: Loc }): Loc {
+    const p = this.prev();
+    return p.kind === 'punct' && p.text === ';' ? p.loc : last.loc;
+  }
+
   /** A missing `;` is recorded with an insertion fix and parsing continues. */
   expectSemi(): void {
     if (this.eatP(';')) return;
@@ -230,13 +236,14 @@ class Parser {
         this.next();
         const expr = this.isP(';') ? undefined : this.parseExpr();
         this.expectSemi();
-        return { kind: 'Return', expr, loc: expr ? join(t.loc, expr.loc) : t.loc };
+        // the statement's span includes its ';' so a replacement edit leaves no stray semicolon behind
+        return { kind: 'Return', expr, loc: join(t.loc, this.endOfStmt(expr ?? { loc: t.loc })) };
       }
       if (t.text === 'throw') {
         this.next();
         const expr = this.parseExpr();
         this.expectSemi();
-        return { kind: 'Throw', expr, loc: join(t.loc, expr.loc) };
+        return { kind: 'Throw', expr, loc: join(t.loc, this.endOfStmt(expr)) };
       }
       if (t.text === 'try') {
         this.next();

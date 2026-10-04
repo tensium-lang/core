@@ -115,3 +115,55 @@ test('the header is carried into the emitted TypeScript', () => {
   const r = compile('// This file has one function that always gives back the number one.\nfn f(): number { return 1; }');
   assert.ok(r.ts!.startsWith('// This file has one function that always gives back the number one.\n'));
 });
+
+test('TN0010: a return inside a value arm reports once, without follow-on type errors', () => {
+  const src = H + `fn f(a: string, b: string): Result<number, string> {
+  return match parseInt(a) {
+    ok(x) => {
+      return match parseInt(b) {
+        ok(y) => ok(x + y),
+        err(e) => err("bad b"),
+      };
+    },
+    err(e) => err("bad a"),
+  };
+}`;
+  assert.deepEqual(compile(src).diagnostics.map((d) => d.code), ['TN0010']);
+});
+
+test('TN0010: the suggested edit removes the return and the semicolon, and the result compiles', () => {
+  const src = H + `fn f(a: string, b: string): Result<number, string> {
+  return match parseInt(a) {
+    ok(x) => {
+      return match parseInt(b) {
+        ok(y) => ok(x + y),
+        err(e) => err("bad b"),
+      };
+    },
+    err(e) => err("bad a"),
+  };
+}
+`;
+  const d = compile(src).diagnostics[0];
+  assert.equal(d.code, 'TN0010');
+  assert.equal(d.expected !== null && d.actual !== null, true);
+  const e = d.suggestedFix!.edit!;
+  assert.ok(src.slice(offsetOf(src, e.span.startLine, e.span.startCol), offsetOf(src, e.span.endLine, e.span.endCol)).endsWith(';'), 'span includes the semicolon');
+  const fixed = applyEdit(src, e);
+  assert.deepEqual(compile(fixed).diagnostics, []);
+});
+
+test('TN1001: the suggested edit does not leave a double semicolon', () => {
+  const src = H + 'fn f(x: number): Result<number, string> {\n  if (x < 0) { throw "neg"; }\n  return ok(x);\n}\n';
+  const d = compile(src).diagnostics.find((x) => x.code === 'TN1001')!;
+  const fixed = applyEdit(src, d.suggestedFix!.edit!);
+  assert.ok(!fixed.includes(';;'));
+  assert.deepEqual(compile(fixed).diagnostics, []);
+});
+
+function offsetOf(src: string, line: number, col: number): number {
+  return src.split('\n').slice(0, line - 1).reduce((a, l) => a + l.length + 1, 0) + col - 1;
+}
+function applyEdit(src: string, e: { span: { startLine: number; startCol: number; endLine: number; endCol: number }; newText: string }): string {
+  return src.slice(0, offsetOf(src, e.span.startLine, e.span.startCol)) + e.newText + src.slice(offsetOf(src, e.span.endLine, e.span.endCol));
+}

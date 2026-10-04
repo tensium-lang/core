@@ -83,6 +83,8 @@ class Checker {
   fnNodes = new Map<Fn, Sig>();
   cur: FnCtx = { ret: null, retTys: [] };
   valueDepth = 0;
+  /** Counts invalid-value-block errors so enclosing blocks can go quiet instead of piling on follow-on type errors. */
+  taint = 0;
   lines: string[];
 
   constructor(private src: string, private file: string) { this.lines = src.split('\n'); }
@@ -208,17 +210,20 @@ class Checker {
     const scope = new Scope(parent);
     for (const v of bindings) scope.vars.set(v.name, v);
     for (const n of narrowNames) this.narrow(scope, n);
-    for (const s of b.stmts) {
-      this.checkStmt(s, scope);
+    const taint0 = this.taint;
+    b.stmts.forEach((s, i) => {
+      // a trailing `return X;` in a value block is the common mistake: X should be the block's value
+      this.checkStmt(s, scope, value && !b.tail && i === b.stmts.length - 1);
       if (s.kind === 'ExprStmt' && s.expr.kind === 'If' && !s.expr.else && blockReturns(s.expr.then)) {
         for (const n of narrowings(s.expr.cond).f) this.narrow(scope, n);
       }
-    }
+    });
     let ty: Ty = T.void;
     if (b.tail) {
       if (value) ty = this.checkExpr(b.tail, scope);
       else this.checkExprStmt(b.tail, b.tail.loc, scope);
     }
+    if (value && this.taint > taint0) ty = T.unknown; // the real error was already reported; don't cascade
     for (const v of scope.vars.values()) {
       if (v.isLet && v.ty.k === 'result' && !v.used) {
         this.err('TN1002', `Result '${v.name}' is never handled.`, v.loc, {
@@ -230,7 +235,7 @@ class Checker {
     return ty;
   }
 
-  checkStmt(s: Stmt, scope: Scope): void {
+  checkStmt(s: Stmt, scope: Scope, asValueTail = false): void {
     switch (s.kind) {
       case 'Let': {
         const declared = s.typeNode ? this.resolveType(s.typeNode) : undefined;
@@ -257,13 +262,19 @@ class Checker {
       }
       case 'Return': {
         const t = s.expr ? this.checkExpr(s.expr, scope) : T.void;
-        if (this.valueDepth > 0) {
+        const inValue = this.valueDepth > 0;
+        if (inValue) {
+          this.taint++;
           this.err('TN0010', "'return' is not allowed inside a match arm or if-expression that produces a value.", s.loc, {
-            fix: { description: "Make the block's last expression (without ';') the value instead of returning" },
+            expected: "the block's value as its last expression, without 'return' or ';'", actual: 'return statement',
+            fix: asValueTail && s.expr
+              ? { description: "Make the returned expression the block's value: remove 'return' and the ';'", edit: { loc: s.loc, newText: this.txt(s.expr.loc) } }
+              : { description: "Make the block's last expression (without ';') the value instead of returning" },
           });
         }
         const ret = this.cur.ret;
-        if (ret) {
+        if (inValue) { /* already invalid; checking it against the function's return type would only add noise */ }
+        else if (ret) {
           if (s.expr) this.reportAssign(t, ret, s.expr);
           else if (ret.k !== 'void' && ret.k !== 'unknown') {
             this.err('TN0002', "A 'return' statement must return a value.", s.loc, { expected: tyStr(ret), actual: 'void' });
