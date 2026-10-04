@@ -11,11 +11,12 @@
 // gives compiler feedback, logs attempts and scores them.
 //
 //   init   --run ID [--suite boundary|silent] [--arms tn,ts-shared,ts-split] [--trials N] [--max-iter N] [--tasks a,b] [--note TEXT]
+//          (extra TypeScript arms for Experiment 4b: ts-shared-comment, ts-split-comment, ts-shared-typed, ts-split-typed)
 //   submit <workdir>      check the app, log the attempt, print the compiler's feedback
 //   score  <run ID>       run the hidden end-to-end tests on each final attempt and print the table
-//   verify [--suite S]    no helpers: check the starter app and the reference solutions in every arm
+//   verify [--suite S] [--arms ...] [--tasks ...]   no helpers: check the starter app and the reference solutions in every arm
 //   drift                 no helpers: plant classic client/server mistakes in every arm (boundary suite) and see which compiler notices
-//   traps  [--suite S]    no helpers: run each task's tempting-but-wrong version through every arm's compiler and the hidden tests
+//   traps  [--suite S] [--arms ...] [--tasks ...]   no helpers: each task's tempting-but-wrong version through every arm's compiler and the hidden tests
 
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -43,9 +44,34 @@ const B = () => SUITES[suite].dir;
 const TASKS = () => join(B(), 'tasks');
 const TEST_KEY = 'test-signing-key-7f3a';
 
-/** tn = Tensium; ts-shared = TypeScript with one shared types file; ts-split = TypeScript where each side has its own copy of the types. */
-type Arm = 'tn' | 'ts-shared' | 'ts-split';
-const ARMS: Arm[] = ['tn', 'ts-shared', 'ts-split'];
+/**
+ * tn = Tensium. The TypeScript arms differ in two ways: where the types live (ts-shared = one shared
+ * types file, ts-split = each side has its own copy) and whether the starter carries a fix for the
+ * "server returns a bare value" bug (none; -comment = a one-line convention comment; -typed = a typed
+ * route table that makes tsc reject a route whose function does not return a Result).
+ */
+type Arm = 'tn' | 'ts-shared' | 'ts-split' | 'ts-shared-comment' | 'ts-split-comment' | 'ts-shared-typed' | 'ts-split-typed';
+const ARMS: Arm[] = ['tn', 'ts-shared', 'ts-split', 'ts-shared-comment', 'ts-split-comment', 'ts-shared-typed', 'ts-split-typed'];
+const DEFAULT_ARMS: Arm[] = ['tn', 'ts-shared', 'ts-split'];
+const layoutOf = (arm: Arm): 'shared' | 'split' => (arm.startsWith('ts-shared') ? 'shared' : 'split');
+const variantOf = (arm: Arm): 'plain' | 'comment' | 'typed' => (arm.endsWith('-comment') ? 'comment' : arm.endsWith('-typed') ? 'typed' : 'plain');
+
+/** Reads `--arms a,b` (or the three original arms) and checks every name. */
+function armsFromArgs(): Arm[] {
+  const arms = (opt('--arms')?.split(',') ?? DEFAULT_ARMS) as Arm[];
+  for (const a of arms) if (!ARMS.includes(a)) throw new Error(`unknown arm ${a}; use ${ARMS.join(', ')}`);
+  return arms;
+}
+
+// The two TypeScript baselines for Experiment 4b. Each is one small change to the starter's server.ts.
+const ROUTES_DECL = 'const routes: Record<string, (args: any[]) => unknown> = {';
+const CONVENTION_COMMENT = '// Convention: every function the client can call must return a Result (ok(...) or err(...)), never a bare value.\n';
+const TYPED_ROUTES_DECL = 'type ServerHandler = (args: any[]) => Result<unknown, string>;\n\nconst routes: Record<string, ServerHandler> = {';
+function withVariant(server: string, variant: 'plain' | 'comment' | 'typed'): string {
+  if (variant === 'plain') return server;
+  if (!server.includes(ROUTES_DECL)) throw new Error('expected the routes table declaration in server.ts');
+  return server.replace(ROUTES_DECL, variant === 'comment' ? CONVENTION_COMMENT + ROUTES_DECL : TYPED_ROUTES_DECL);
+}
 type Files = Record<string, string>;
 interface Meta { runId: string; task: string; arm: Arm; trial: number; maxIter: number; suite?: Suite }
 interface Attempt { n: number; at: string; ok: boolean; errors: number; codes: string[]; dir: string }
@@ -75,7 +101,8 @@ function appFiles(arm: Arm, from: 'starter' | string, variant: 'solution' | 'tra
   if (arm === 'tn') return { 'app.tn': read(from === 'starter' ? SUITES[suite].tnStarter : join(TASKS(), from, variant, 'app.tn')) };
   const dir = from === 'starter' ? join(B(), 'app', 'ts') : join(TASKS(), from, variant);
   const shared: Files = Object.fromEntries(['types.ts', 'server.ts', 'client.ts'].map((f) => [f, read(join(dir, f))]));
-  return arm === 'ts-shared' ? shared : splitFrom(shared);
+  shared['server.ts'] = withVariant(shared['server.ts'], variantOf(arm));
+  return layoutOf(arm) === 'shared' ? shared : splitFrom(shared);
 }
 
 const TSCONFIG = `// Settings for the TypeScript checker, written by the experiment tool on every submit.
@@ -133,7 +160,7 @@ Read the language reference first: \`${langPath}\``
     : `You are working on a small client/server shop app written in TypeScript, in \`${dir}\`:
 
 - \`server.ts\` runs on the server.
-- \`client.ts\` runs in the browser.${meta.arm === 'ts-shared' ? '\n- `types.ts` holds the types that both of them import.' : ''}
+- \`client.ts\` runs in the browser.${layoutOf(meta.arm) === 'shared' ? '\n- `types.ts` holds the types that both of them import.' : ''}
 
 The client calls the server over HTTP: \`POST /rpc/<function name>\` with a JSON array of the arguments.`;
   const checker = meta.arm === 'tn' ? 'the Tensium compiler' : 'the TypeScript compiler (`tsc --strict`)';
@@ -169,8 +196,7 @@ Rules of the exercise (important for the experiment to be valid):
 function init(): void {
   const runId = opt('--run');
   if (!runId) throw new Error('--run ID is required');
-  const arms = opt('--arms', ARMS.join(','))!.split(',') as Arm[];
-  for (const a of arms) if (!ARMS.includes(a)) throw new Error(`unknown arm ${a}; use ${ARMS.join(', ')}`);
+  const arms = armsFromArgs();
   const trials = Number(opt('--trials', '1'));
   const maxIter = Number(opt('--max-iter', '6'));
   useSuite(opt('--suite'));
@@ -300,12 +326,13 @@ function verify(): void {
     if (!good) failures++;
     console.log(`${good ? 'ok  ' : 'FAIL'} ${label}${good ? '' : `  (expected ${want ? 'pass' : 'fail'}) ${detail}`}`);
   };
-  for (const arm of ARMS) {
+  const only = opt('--tasks')?.split(',');
+  for (const arm of armsFromArgs()) {
     const starter = place(`starter__${arm}`, appFiles(arm, 'starter'));
     expect(`${arm}: starter passes its compiler`, check(starter, arm).ok, true);
     const base = e2e(starter, arm, join(B(), 'baseline.tests.ts'));
     expect(`${arm}: starter passes the baseline tests`, base.ok, true, base.error);
-    for (const task of taskIds()) {
+    for (const task of taskIds().filter((t) => !only || only.includes(t))) {
       const tests = join(TASKS(), task, 'tests.ts');
       expect(`${arm}: starter does NOT already pass ${task}`, e2e(starter, arm, tests).ok, false);
       const sol = place(`${task}__${arm}`, appFiles(arm, task));
@@ -391,7 +418,7 @@ export async function receiptIsValid(productId: number, quantity: number, custom
           "): boolean {\n  const receipt = checkout(productId, quantity, customerId);\n  return receipt.ok && receipt.value.signature === signature;"), 'server.ts'),
   });
   const lines = ['| planted mistake | arm | its compiler says | hidden end-to-end tests |', '|---|---|---|---|'];
-  for (const [i, c] of cases.entries()) for (const arm of ARMS) {
+  for (const [i, c] of cases.entries()) for (const arm of DEFAULT_ARMS) {
     const dir = join(scratch, `m${i + 1}__${arm}`);
     mkdirSync(dir, { recursive: true });
     for (const [f, text] of Object.entries(c.files(arm))) writeFileSync(join(dir, f), text);
@@ -412,9 +439,10 @@ function traps(): void {
   useSuite(opt('--suite', 'silent'));
   const scratch = join(RUNS, `_traps_${suite}`);
   const lines = ['| task | arm | its compiler says | hidden end-to-end tests |', '|---|---|---|---|'];
-  for (const task of taskIds()) {
+  const only = opt('--tasks')?.split(',');
+  for (const task of taskIds().filter((t) => !only || only.includes(t))) {
     if (!existsSync(join(TASKS(), task, 'trap'))) continue;
-    for (const arm of ARMS) {
+    for (const arm of armsFromArgs()) {
       const dir = join(scratch, `${task}__${arm}`);
       mkdirSync(dir, { recursive: true });
       for (const [f, text] of Object.entries(appFiles(arm, task, 'trap'))) writeFileSync(join(dir, f), text);

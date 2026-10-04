@@ -125,6 +125,20 @@ npx tsx harness/boundary.ts traps --suite silent    # no agents: each task's tem
 
 The tasks, the predictions and the rules for reading the result were written down before any agent ran: `harness/silent/PREREGISTRATION.md`. The tasks were chosen to be hard for `tsc`, so a Tensium win only means "on bugs of this shape, Tensium catches what tsc ships".
 
+### Experiment 4b: can plain TypeScript be given the same protection cheaply?
+
+The one bug that repeated in Experiment 4 was a server function returning a bare value. Two TypeScript baselines a real team might ship, each one change to the starter's `server.ts`, made by the harness:
+
+- `ts-shared-comment`, `ts-split-comment`: a one-line comment above the route table saying every client-callable function must return a Result.
+- `ts-shared-typed`, `ts-split-typed`: the route table is typed (`ServerHandler`), so `tsc --strict` rejects a route whose function returns a bare value.
+
+```
+npx tsx harness/boundary.ts traps --suite silent --tasks 01-coupon-check,02-loyalty-points,03-store-notice \
+  --arms tn,ts-shared,ts-split,ts-shared-comment,ts-split-comment,ts-shared-typed,ts-split-typed
+```
+
+`verify`, `traps` and `init` all take `--arms` and `--tasks`. Baselines, predictions and the reading rule (comment fixes it / only the wrapper fixes it / neither): `harness/silent/PREREGISTRATION-4b.md`.
+
 ## Experiment 1: feedback format
 
 Question: given the same task, language and model, does the *format* of compiler feedback change iterations-to-correct and final correctness?
