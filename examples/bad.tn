@@ -1,0 +1,20 @@
+// This file is a program full of mistakes on purpose. It uses every rule the checker enforces
+// so you can run "tn check" on it and see what the error reports look like. (Do not copy
+// this code!)
+
+function half(n) {
+  if (n < 0) { throw "neg"; }
+  return n / 2;
+}
+
+fn run(s: string): Result<number, string> {
+  parseInt(s);
+  let x: number = parseInt(s) + 1;
+  return match parseInt(s) {
+    ok(n) => ok(n),
+  };
+}
+
+fn nul(s: string | null): number {
+  return len(s);
+}

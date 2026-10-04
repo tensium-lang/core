@@ -1,0 +1,28 @@
+// This file is a small example program with no mistakes. It shows how to turn text into an age
+// safely, how to handle both the ok case and the err case of a Result, and how to check for
+// null before using a value.
+
+fn parseAge(s: string): Result<number, string> {
+  return match parseInt(s) {
+    ok(n) => if (n < 0) { err("negative") } else { ok(n) },
+    err(e) => err(e),
+  };
+}
+
+fn describe(s: string): string {
+  match parseAge(s) {
+    ok(n) => { return "age " + str(n); }
+    err(e) => { return "bad: " + e; }
+  }
+}
+
+fn firstChar(s: string): string | null {
+  if (len(s) == 0) { return null; }
+  return substring(s, 0, 1);
+}
+
+fn upperFirst(s: string): string {
+  let c = firstChar(s);
+  if (c === null) { return ""; }
+  return toUpper(c);
+}

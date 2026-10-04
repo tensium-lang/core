@@ -1,0 +1,5 @@
+# This file lists folders git should not save: downloaded packages, experiment run folders, and temp files.
+
+node_modules
+runs
+*.tmp
