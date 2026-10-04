@@ -20,6 +20,7 @@ npx tsx src/cli.ts check examples/bad.tn                 # pretty-printed
 npx tsx src/cli.ts check examples/bad.tn --format json   # JSON array — what an agent consumes
 npx tsx src/cli.ts check examples/bad.tn --format prose  # one-line compiler-style messages
 npx tsx src/cli.ts build examples/good.tn -o out.ts      # transpile to TypeScript (only if the check passes)
+npx tsx src/cli.ts fix examples/bad.tn [--write]          # apply the checker's own suggested edits until clean or stuck (no model, no guessing)
 ```
 
 Exit code is 1 when there are errors. Language reference: `harness/language.ts` generates it (`runs/<id>/LANGUAGE.md`).
@@ -60,6 +61,9 @@ npx tsx harness/cli.ts init --run r1 [--arms A=prose,B=json] [--trials 1] [--max
 #   -> runs/r1/<task>__<arm>__t<k>/TASK.md for each run; hand each TASK.md to a fresh agent
 #   the agent edits solution.tn and calls:  npx tsx harness/cli.ts submit <workdir>   (this logs the attempt)
 npx tsx harness/cli.ts score r1
+npx tsx harness/cli.ts autofix r1
+#   -> no model: applies only the checker's suggested edits to every FAILED submission and reports how many become
+#      clean and pass the hidden tests (runs/r1/autofix.md). Measures diagnostic quality independent of any agent.
 #   -> runs/r1/results.json, runs/r1/report.md, and the comparison table
 ```
 

@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { applyFixes } from '../src/fix.ts';
 import { compile } from '../src/index.ts';
 
 // Every .tn file needs a plain-words header (rule TN4001/TN4002), so test programs get one.
@@ -167,3 +168,26 @@ function offsetOf(src: string, line: number, col: number): number {
 function applyEdit(src: string, e: { span: { startLine: number; startCol: number; endLine: number; endCol: number }; newText: string }): string {
   return src.slice(0, offsetOf(src, e.span.startLine, e.span.startCol)) + e.newText + src.slice(offsetOf(src, e.span.endLine, e.span.endCol));
 }
+
+test('applyFixes: repairs mistakes that carry mechanical edits, and stops (without guessing) when none are left', () => {
+  const fixable = H + `fn f(a: string, b: string): Result<number, string> {
+  return match parseInt(a) {
+    ok(x) => {
+      return match parseInt(b) {
+        ok(y) => ok(x + y),
+        err(e) => err("bad b"),
+      };
+    },
+    err(e) => err("bad a"),
+  };
+}
+`;
+  const r = applyFixes(fixable);
+  assert.equal(r.ok, true);
+  assert.ok(r.rounds >= 1 && r.applied >= 1);
+  assert.deepEqual(compile(r.source).diagnostics, []);
+  // no suggestion with an edit -> unchanged, reported as stuck
+  const stuck = applyFixes(H + 'fn f(x: number | null): number { return x + 1; }\n');
+  assert.equal(stuck.ok, false);
+  assert.equal(stuck.applied, 0);
+});

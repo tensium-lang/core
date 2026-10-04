@@ -10,10 +10,13 @@
 //   init   [--run ID] [--arms A=prose,B=json] [--trials N] [--max-iter N] [--tasks a,b] [--reference full|terse] [--note TEXT]
 //   submit <workdir>             check solution.tn, log the attempt, print feedback in this workdir's arm format
 //   score  <run ID>              run hidden tests on each final attempt, write results.json + report.md, print table
+//   autofix <run ID>             no model: apply the checker's own suggested edits to every FAILED attempt, see how many
+//                                become clean and correct (measures the diagnostics, not the agents)
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { applyFixes } from '../src/fix.ts';
 import { compile, toJSON, toProse } from '../src/index.ts';
 import { ReferenceKind, languageReference } from './language.ts';
 
@@ -147,18 +150,68 @@ async function score(): Promise<void> {
       const ts = compile(src, 'solution.tn').ts!;
       const tsPath = join(dir, 'final.ts');
       writeFileSync(tsPath, ts);
-      try {
-        const mod = await import(pathToFileURL(tsPath).href);
-        const tests = (await import(pathToFileURL(join(TASKS, meta.task, 'tests.ts')).href)).default;
-        tests(mod);
-        row.correct = true;
-      } catch (e) { row.testError = e instanceof Error ? e.message.split('\n')[0] : String(e); }
+      row.testError = await runHiddenTests(meta.task, tsPath);
+      row.correct = row.testError === undefined;
     }
     rows.push(row);
   }
   writeFileSync(join(runDir, 'results.json'), JSON.stringify(rows, null, 2));
   const report = renderReport(runId, rows, armOrder, maxIter);
   writeFileSync(join(runDir, 'report.md'), report);
+  console.log(report);
+}
+
+/** Runs a task's hidden tests against emitted TypeScript; returns undefined on success, else the first line of the failure. */
+async function runHiddenTests(task: string, tsPath: string): Promise<string | undefined> {
+  try {
+    const mod = await import(pathToFileURL(tsPath).href);
+    const tests = (await import(pathToFileURL(join(TASKS, task, 'tests.ts')).href)).default;
+    tests(mod);
+    return undefined;
+  } catch (e) { return e instanceof Error ? e.message.split('\n')[0] : String(e); }
+}
+
+interface FixRow { task: string; arm: string; trial: number; attempt: number; firstCode: string; codes: string[]; clean: boolean; correct: boolean; rounds: number; applied: number; testError?: string }
+
+async function autofix(): Promise<void> {
+  const runId = argv[1];
+  if (!runId) { console.error('usage: autofix <run ID>'); process.exit(2); }
+  const runDir = join(RUNS, runId);
+  const rows: FixRow[] = [];
+  for (const dir of readJSON<string[]>(join(runDir, 'workdirs.json'))) {
+    const meta = readJSON<Meta>(join(dir, 'meta.json'));
+    const logPath = join(dir, 'attempts.jsonl');
+    if (!existsSync(logPath)) continue;
+    const attempts: Attempt[] = readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    for (const a of attempts.filter((x) => !x.ok)) {
+      const fixed = applyFixes(readFileSync(join(dir, a.file), 'utf8'), 'solution.tn');
+      const row: FixRow = { task: meta.task, arm: meta.arm, trial: meta.trial, attempt: a.n, firstCode: a.codes[0] ?? '?', codes: a.codes,
+        clean: fixed.ok, correct: false, rounds: fixed.rounds, applied: fixed.applied };
+      if (fixed.ok) {
+        const tsPath = join(dir, `autofix-${a.n}.ts`);
+        writeFileSync(tsPath, compile(fixed.source, 'solution.tn').ts!);
+        row.testError = await runHiddenTests(meta.task, tsPath);
+        row.correct = row.testError === undefined;
+      }
+      rows.push(row);
+    }
+  }
+  writeFileSync(join(runDir, 'autofix.json'), JSON.stringify(rows, null, 2));
+  const pct = (n: number, d: number) => (d ? `${Math.round((100 * n) / d)}%` : '—');
+  const group = (key: (r: FixRow) => string) => {
+    const m = new Map<string, FixRow[]>();
+    for (const r of rows) m.set(key(r), [...(m.get(key(r)) ?? []), r]);
+    return [...m.entries()].sort();
+  };
+  const out = [`# Autofix: ${runId}`, '', `Applying only the checker's own suggested edits (no model) to every failed submission (${rows.length}).`, '',
+    '| group | failed submissions | made clean | clean and passes hidden tests | mean rounds (clean) |', '|---|---|---|---|---|'];
+  const line = (name: string, rs: FixRow[]) => out.push(`| ${name} | ${rs.length} | ${rs.filter((r) => r.clean).length} (${pct(rs.filter((r) => r.clean).length, rs.length)}) | ${rs.filter((r) => r.correct).length} (${pct(rs.filter((r) => r.correct).length, rs.length)}) | ${f1(mean(rs.filter((r) => r.clean).map((r) => r.rounds)))} |`);
+  line('**all failed submissions**', rows);
+  for (const [code, rs] of group((r) => r.firstCode)) line(`first diagnostic ${code}`, rs);
+  const bad = rows.filter((r) => r.clean && !r.correct);
+  if (bad.length) out.push('', 'Fixed to a clean program that fails the hidden tests:', ...bad.map((r) => `- ${r.task} [${r.arm} t${r.trial} #${r.attempt}] ${r.codes.join(',')}: ${r.testError}`));
+  const report = out.join('\n');
+  writeFileSync(join(runDir, 'autofix.md'), report);
   console.log(report);
 }
 
@@ -195,5 +248,6 @@ const cmd = argv[0];
 if (cmd === 'init') init();
 else if (cmd === 'submit') submit();
 else if (cmd === 'score') await score();
-else { console.error('usage: init | submit <workdir> | score <run ID>'); process.exit(2); }
+else if (cmd === 'autofix') await autofix();
+else { console.error('usage: init | submit <workdir> | score <run ID> | autofix <run ID>'); process.exit(2); }
 void basename;

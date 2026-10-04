@@ -5,17 +5,26 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { applyFixes } from './fix.ts';
 import { compile, toJSON, toPretty, toProse } from './index.ts';
 
 const USAGE = `usage:
   tn check <file.tn> [--format json|pretty|prose]   (default: pretty; exit 1 on errors)
-  tn build <file.tn> [-o out.ts]                    (writes TypeScript; prints diagnostics and exits 1 on errors)`;
+  tn build <file.tn> [-o out.ts]                    (writes TypeScript; prints diagnostics and exits 1 on errors)
+  tn fix <file.tn> [--write]                        (applies the checker's own suggested edits until clean or stuck;
+                                                     prints the repaired file, or rewrites it with --write)`;
 
 const [cmd, file, ...rest] = process.argv.slice(2);
-if (!cmd || !file || !['check', 'build'].includes(cmd)) { console.error(USAGE); process.exit(2); }
+if (!cmd || !file || !['check', 'build', 'fix'].includes(cmd)) { console.error(USAGE); process.exit(2); }
 
 const flag = (name: string) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
 const source = readFileSync(file, 'utf8');
+if (cmd === 'fix') {
+  const fixed = applyFixes(source, basename(file));
+  if (rest.includes('--write')) writeFileSync(file, fixed.source); else process.stdout.write(fixed.source);
+  console.error(fixed.ok ? `fixed in ${fixed.rounds} round(s), ${fixed.applied} edit(s)` : `stuck after ${fixed.rounds} round(s); ${fixed.remaining.length} problem(s) need a person or an agent`);
+  process.exit(fixed.ok ? 0 : 1);
+}
 const result = compile(source, basename(file));
 const format = flag('--format') ?? (cmd === 'build' ? 'pretty' : 'pretty');
 
