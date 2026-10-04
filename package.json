@@ -1,0 +1,10 @@
+{
+  "name": "@tensium/core",
+  "version": "0.0.1",
+  "description": "An agent-native programming language — strict, self-checking, compiles to TypeScript. Work in progress.",
+  "keywords": ["language", "compiler", "typescript", "agents", "ai"],
+  "author": "Jay McCauley",
+  "license": "MIT",
+  "homepage": "https://tensium.dev",
+  "private": false
+}
