@@ -15,7 +15,7 @@ export interface Token {
 
 const PUNCT = [
   '===', '!==', '=>', '==', '!=', '<=', '>=', '&&', '||',
-  '+', '-', '*', '/', '%', '<', '>', '=', '!', '(', ')', '{', '}', ':', ';', ',', '|',
+  '+', '-', '*', '/', '%', '<', '>', '=', '!', '(', ')', '{', '}', ':', ';', ',', '|', '.',
 ];
 
 export function lex(src: string, file: string): { tokens: Token[]; diagnostics: Diagnostic[] } {

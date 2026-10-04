@@ -20,8 +20,15 @@ export type Expr =
   | { kind: 'Call'; name: string; nameLoc: Loc; args: Expr[]; loc: Loc }
   | { kind: 'Unary'; op: '!' | '-'; expr: Expr; loc: Loc }
   | { kind: 'Binary'; op: string; left: Expr; right: Expr; loc: Loc }
+  | { kind: 'Field'; obj: Expr; name: string; nameLoc: Loc; loc: Loc }
+  | RecordExpr
   | IfExpr
   | MatchExpr;
+
+export interface RecordField { name: string; nameLoc: Loc; value: Expr }
+
+/** A record value written out in full: `{ id: 1, name: "Ann" }`. */
+export interface RecordExpr { kind: 'Record'; fields: RecordField[]; loc: Loc }
 
 export interface IfExpr { kind: 'If'; cond: Expr; then: Block; else?: Block | IfExpr; loc: Loc }
 
@@ -48,7 +55,13 @@ export type Stmt =
 
 export interface Param { name: string; nameLoc: Loc; typeNode?: TypeNode }
 
+/** Where a function runs. `shared` functions are plain helpers that run on either side. */
+export type Side = 'server' | 'client' | 'shared';
+
 export interface Fn {
+  side: Side;
+  /** The `fn` keyword (a side marker, if any, sits just before it). */
+  fnLoc: Loc;
   name: string;
   nameLoc: Loc;
   params: Param[];
@@ -58,4 +71,9 @@ export interface Fn {
   loc: Loc;
 }
 
-export interface Program { fns: Fn[] }
+export interface TypeField { name: string; nameLoc: Loc; typeNode: TypeNode }
+
+/** `type User = { id: number, name: string }` */
+export interface TypeDecl { name: string; nameLoc: Loc; fields: TypeField[]; loc: Loc }
+
+export interface Program { types: TypeDecl[]; fns: Fn[] }

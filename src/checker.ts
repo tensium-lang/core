@@ -1,13 +1,15 @@
 // This file is the rule-checker, the "teacher" that reads a program and marks mistakes.
 // It makes sure the program follows Tensium's rules: failures are returned as values
 // instead of thrown, every Result is opened with both an ok and an err case, and nothing
-// that might be empty (null) gets used before it is checked. Each mistake becomes a
-// diagnostic with the exact spot, what was expected, what was found, and a suggested fix.
+// that might be empty (null) gets used before it is checked. It also guards the line between
+// client and server: both sides must agree on every record field, and secrets must stay on
+// the server. Each mistake becomes a diagnostic with the exact spot, what was expected, what
+// was found, and a suggested fix.
 
-import { Block, Expr, Fn, IfExpr, MatchExpr, Program, Stmt, TypeNode } from './ast.ts';
+import { Block, Expr, Fn, IfExpr, MatchExpr, Program, RecordExpr, Side, Stmt, TypeDecl, TypeNode } from './ast.ts';
 import { Diagnostic, FixSpec, Loc, mkDiag } from './diagnostics.ts';
 import { PRELUDE } from './prelude.ts';
-import { T, Ty, assignable, isComplete, tyStr, unify } from './types.ts';
+import { T, Ty, assignable, containsSecret, isComplete, tyStr, unify } from './types.ts';
 
 class Var {
   used = false;
@@ -27,15 +29,28 @@ class Scope {
 
 const markUsed = (v: Var): void => { v.used = true; if (v.orig) markUsed(v.orig); };
 
-interface Sig { params: Ty[]; ret: Ty | null }
+interface Sig { params: Ty[]; ret: Ty | null; side: Side; fn?: Fn }
 interface FnCtx { ret: Ty | null; retTys: Ty[] }
+interface DeclInfo { decl: TypeDecl; ty?: Ty; resolving?: boolean }
+type RecordTy = Extract<Ty, { k: 'record' }>;
+
+export interface CheckResult {
+  diagnostics: Diagnostic[];
+  /** Names of the server fns that client code calls: the only ones exposed over the network. */
+  boundary: string[];
+}
+
+const BUILTIN_TYPES = ['number', 'string', 'boolean', 'void', 'null', 'any', 'undefined', 'Result', 'Secret'];
 
 function lev(a: string, b: string): number {
   const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
   for (let j = 1; j <= b.length; j++) d[0][j] = j;
   for (let i = 1; i <= a.length; i++)
-    for (let j = 1; j <= b.length; j++)
+    for (let j = 1; j <= b.length; j++) {
       d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      // two neighbouring letters swapped ("nmae" for "name") counts as one slip, not two
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
   return d[a.length][b.length];
 }
 
@@ -43,6 +58,15 @@ const nearest = (name: string, cands: string[]): string | undefined => {
   let best: string | undefined, bd = Infinity;
   for (const c of cands) { const d = lev(name, c); if (d < bd) { bd = d; best = c; } }
   return best !== undefined && bd <= Math.max(1, Math.floor(name.length / 3)) ? best : undefined;
+};
+
+/** For a renamed field: the closest spelling, or else the only candidate that contains (or is contained in) the old name. */
+const nearestField = (name: string, cands: string[]): string | undefined => {
+  const close = nearest(name, cands);
+  if (close) return close;
+  const n = name.toLowerCase();
+  const related = cands.filter((c) => c.toLowerCase().includes(n) || n.includes(c.toLowerCase()));
+  return related.length === 1 ? related[0] : undefined;
 };
 
 type Narrow = { t: string[]; f: string[] };
@@ -81,7 +105,12 @@ class Checker {
   diags: Diagnostic[] = [];
   fns = new Map<string, Sig>();
   fnNodes = new Map<Fn, Sig>();
+  types = new Map<string, DeclInfo>();
   cur: FnCtx = { ret: null, retTys: [] };
+  curSide: Side = 'shared';
+  curFn: Fn | undefined;
+  /** Server fns called from client code, with the first place each is called. */
+  boundary = new Map<string, Loc>();
   valueDepth = 0;
   /** Counts invalid-value-block errors so enclosing blocks can go quiet instead of piling on follow-on type errors. */
   taint = 0;
@@ -129,11 +158,21 @@ class Checker {
           case 'Result':
             this.err('TN0011', "Result requires two type arguments: Result<T, E>.", n.loc, { expected: 'Result<T, E>', actual: 'Result' });
             return T.unknown;
+          case 'Secret':
+            this.secretOutsideServer('Secret', n.loc);
+            return T.secret;
           default: {
-            const s = nearest(n.name, ['number', 'string', 'boolean', 'void', 'Result']);
+            const d = this.types.get(n.name);
+            if (d) {
+              const t = this.resolveDecl(d);
+              if (containsSecret(t)) this.secretOutsideServer(n.name, n.loc);
+              return t;
+            }
+            const known = ['number', 'string', 'boolean', 'void', 'Result', ...this.types.keys()];
+            const s = nearest(n.name, known);
             this.err('TN0004', `Cannot find type '${n.name}'.`, n.loc, {
-              expected: 'number | string | boolean | void | null | Result<T, E>', actual: n.name,
-              fix: s ? { description: `Did you mean '${s}'?`, edit: { loc: n.loc, newText: s } } : { description: 'Use one of: number, string, boolean, void, null, Result<T, E>' },
+              expected: [...known.slice(0, 4), 'null', 'Result<T, E>', ...this.types.keys()].join(' | '), actual: n.name,
+              fix: s ? { description: `Did you mean '${s}'?`, edit: { loc: n.loc, newText: s } } : { description: "Use a builtin type, or declare one: type Name = { field: type, ... }" },
             });
             return T.unknown;
           }
@@ -141,9 +180,54 @@ class Checker {
     }
   }
 
+  secretOutsideServer(typeName: string, loc: Loc): void {
+    if (this.curSide === 'server') return;
+    this.err('TN5001', typeName === 'Secret'
+      ? "The 'Secret' type can only be used in a server fn; secrets never reach the client."
+      : `Type '${typeName}' holds a Secret, so it can only be used in a server fn.`, loc, {
+      expected: 'no secrets outside server code', actual: `${typeName} in a ${this.curSide} fn`,
+      fix: { description: "Keep the secret inside a 'server fn' and give the client only what it needs" },
+    });
+  }
+
+  resolveDecl(d: DeclInfo): Ty {
+    if (d.ty) return d.ty;
+    if (d.resolving) {
+      this.err('TN0011', `Type '${d.decl.name}' refers to itself; recursive types are not supported.`, d.decl.nameLoc, {
+        expected: 'a type made of other, already complete types', actual: 'a type that contains itself',
+      });
+      return T.unknown;
+    }
+    d.resolving = true;
+    const fields: [string, Ty][] = [];
+    for (const f of d.decl.fields) {
+      if (fields.some(([n]) => n === f.name)) {
+        this.err('TN0007', `Duplicate field '${f.name}' in type '${d.decl.name}'.`, f.nameLoc, { fix: { description: 'Remove or rename the duplicate field' } });
+        continue;
+      }
+      fields.push([f.name, this.resolveType(f.typeNode)]);
+    }
+    d.resolving = false;
+    d.ty = { k: 'record', name: d.decl.name, fields };
+    return d.ty;
+  }
+
   // ---- program
-  run(p: Program): Diagnostic[] {
+  run(p: Program): CheckResult {
+    for (const d of p.types) {
+      if (BUILTIN_TYPES.includes(d.name) || this.types.has(d.name)) {
+        this.err('TN0007', BUILTIN_TYPES.includes(d.name) ? `'${d.name}' is a builtin type and cannot be redefined.` : `Duplicate type '${d.name}'.`, d.nameLoc, {
+          fix: { description: 'Rename the type' },
+        });
+        continue;
+      }
+      this.types.set(d.name, { decl: d });
+    }
+    // A record type may hold a Secret; whether it is allowed is decided at each place the type is used.
+    this.curSide = 'server';
+    for (const d of this.types.values()) this.resolveDecl(d);
     for (const fn of p.fns) {
+      this.curSide = fn.side;
       if (PRELUDE[fn.name] || fn.name === 'ok' || fn.name === 'err' || this.fns.has(fn.name)) {
         this.err('TN0007', PRELUDE[fn.name] || fn.name === 'ok' || fn.name === 'err'
           ? `'${fn.name}' is a builtin and cannot be redefined.` : `Duplicate function '${fn.name}'.`, fn.nameLoc, {
@@ -161,16 +245,55 @@ class Checker {
         return this.resolveType(pa.typeNode);
       });
       const ret = fn.retNode ? this.resolveType(fn.retNode) : null;
-      const sig = { params, ret };
+      const sig: Sig = { params, ret, side: fn.side, fn };
       this.fnNodes.set(fn, sig);
       if (!this.fns.has(fn.name) && !PRELUDE[fn.name]) this.fns.set(fn.name, sig);
     }
     for (const fn of p.fns) this.checkFn(fn);
-    return this.diags;
+    this.checkBoundary();
+    return { diagnostics: this.diags, boundary: [...this.boundary.keys()] };
+  }
+
+  /** Every server fn that client code calls is reachable over the network, so its signature has extra rules. */
+  checkBoundary(): void {
+    for (const name of this.boundary.keys()) {
+      const sig = this.fns.get(name)!;
+      const fn = sig.fn!;
+      fn.params.forEach((pa, i) => {
+        if (pa.typeNode && containsSecret(sig.params[i])) {
+          this.err('TN5002', `Parameter '${pa.name}' of server fn '${name}' carries a Secret, but '${name}' is called from client code.`, pa.typeNode.loc, {
+            expected: 'no Secret in anything that crosses between client and server', actual: tyStr(sig.params[i]),
+            fix: { description: 'Read the secret inside the server fn with secret("NAME") instead of taking it as a parameter' },
+          });
+        }
+      });
+      const ret = sig.ret;
+      if (!ret || !fn.retNode || ret.k === 'unknown') continue;
+      if (containsSecret(ret)) {
+        this.err('TN5002', `Server fn '${name}' is called from client code, so it cannot return a Secret.`, fn.retNode.loc, {
+          expected: 'no Secret in anything that crosses between client and server', actual: tyStr(ret),
+          fix: { description: 'Return only the non-secret data the client needs' },
+        });
+      }
+      if (ret.k !== 'result') {
+        this.err('TN5006', `Server fn '${name}' is called from client code, so it must return Result<T, string>: a network call can fail.`, fn.retNode.loc, {
+          expected: `Result<${tyStr(ret)}, string>`, actual: tyStr(ret),
+          fix: { description: 'Wrap the return type in Result<..., string> and return ok(...) values', edit: { loc: fn.retNode.loc, newText: `Result<${this.txt(fn.retNode.loc)}, string>` } },
+        });
+      } else if (ret.err.k !== 'string' && ret.err.k !== 'unknown') {
+        const at = fn.retNode.kind === 'TypeResult' ? fn.retNode.err.loc : fn.retNode.loc;
+        this.err('TN5006', `Server fn '${name}' is called from client code, so its error type must be string: a network failure arrives as err("network: ...").`, at, {
+          expected: `Result<${tyStr(ret.ok)}, string>`, actual: tyStr(ret),
+          fix: { description: "Use 'string' as the error type" },
+        });
+      }
+    }
   }
 
   checkFn(fn: Fn): void {
     const sig = this.fnNodes.get(fn)!;
+    this.curSide = fn.side;
+    this.curFn = fn;
     const scope = new Scope();
     fn.params.forEach((pa, i) => {
       if (scope.vars.has(pa.name)) this.err('TN0007', `Duplicate parameter '${pa.name}'.`, pa.nameLoc, { fix: { description: 'Rename the parameter' } });
@@ -436,6 +559,13 @@ class Checker {
   // ---- expressions
   reportAssign(actual: Ty, expected: Ty, e: Expr): void {
     if (assignable(actual, expected)) return;
+    // Report as close to the real mistake as possible: look inside ok(...)/err(...) and record values.
+    if (e.kind === 'Call' && (e.name === 'ok' || e.name === 'err') && e.args.length === 1 && actual.k === 'result' && expected.k === 'result') {
+      const [a, x] = e.name === 'ok' ? [actual.ok, expected.ok] : [actual.err, expected.err];
+      if (!assignable(a, x)) { this.reportAssign(a, x, e.args[0]); return; }
+    }
+    const want = expected.k === 'nullable' ? expected.inner : expected;
+    if (actual.k === 'record' && want.k === 'record') { this.reportRecord(actual, want, e); return; }
     const text = this.txt(e.loc);
     const A = tyStr(actual), E = tyStr(expected);
     if (actual.k === 'result' && expected.k !== 'result') {
@@ -450,8 +580,53 @@ class Checker {
           ? { description: `Compare explicitly: ${text} !== null`, edit: { loc: e.loc, newText: `${text} !== null` } }
           : { description: `Check for null first: if (${text} !== null) { ... } (or compare with === null and return early)` },
       });
+    } else if (expected.k === 'result' && actual.k !== 'result' && actual.k !== 'unknown' && assignable(actual, expected.ok)) {
+      this.err('TN0002', `Type '${A}' is not assignable to type '${E}'; a success value must be wrapped in ok(...).`, e.loc, {
+        expected: E, actual: A,
+        fix: { description: 'Wrap the value in ok(...)', edit: { loc: e.loc, newText: `ok(${text})` } },
+      });
     } else {
       this.err('TN0002', `Type '${A}' is not assignable to type '${E}'.`, e.loc, { expected: E, actual: A });
+    }
+  }
+
+  /** A record value that does not fit a record type: say exactly which fields are wrong. */
+  reportRecord(actual: RecordTy, expected: RecordTy, e: Expr): void {
+    const E = tyStr(expected);
+    const act = new Map(actual.fields), exp = new Map(expected.fields);
+    const missing = expected.fields.map(([n]) => n).filter((n) => !act.has(n));
+    const extra = actual.fields.map(([n]) => n).filter((n) => !exp.has(n));
+    const shape = `{ ${expected.fields.map(([n, t]) => `${n}: ${tyStr(t)}`).join(', ')} }`;
+    if (e.kind !== 'Record') {
+      this.err(missing.length || extra.length ? 'TN5005' : 'TN0002', `Type '${tyStr(actual)}' is not assignable to type '${E}'.`, e.loc, {
+        expected: shape,
+        actual: [missing.length ? `missing: ${missing.join(', ')}` : '', extra.length ? `not in ${E}: ${extra.join(', ')}` : ''].filter(Boolean).join('; ') || tyStr(actual),
+      });
+      return;
+    }
+    const unclaimed = [...missing];
+    for (const name of extra) {
+      const f = e.fields.find((x) => x.name === name)!;
+      const guess = nearestField(name, unclaimed);
+      if (guess) unclaimed.splice(unclaimed.indexOf(guess), 1);
+      // `{ name }` shorthand has to become `{ fullName: name }`, not just a renamed word
+      const shorthand = f.value.kind === 'Ident' && f.value.loc.so === f.nameLoc.so;
+      this.err('TN5005', `'${name}' is not a field of type '${E}'.`, f.nameLoc, {
+        expected: shape, actual: name,
+        fix: guess
+          ? { description: `Did you mean '${guess}'?`, edit: { loc: f.nameLoc, newText: shorthand ? `${guess}: ${name}` : guess } }
+          : { description: `Remove '${name}', or add it to type ${E}` },
+      });
+    }
+    for (const name of unclaimed) {
+      this.err('TN5005', `Field '${name}' is missing in this ${E} value.`, e.loc, {
+        expected: `${name}: ${tyStr(exp.get(name)!)}`, actual: 'missing',
+        fix: { description: `Add '${name}: <${tyStr(exp.get(name)!)}>' to the record` },
+      });
+    }
+    for (const f of e.fields) {
+      const a = act.get(f.name), x = exp.get(f.name);
+      if (a && x) this.reportAssign(a, x, f.value);
     }
   }
 
@@ -489,9 +664,83 @@ class Checker {
       }
       case 'Binary': return this.checkBinary(e, scope);
       case 'Call': return this.checkCall(e, scope);
+      case 'Field': return this.checkField(e, scope);
+      case 'Record': return this.checkRecord(e, scope);
       case 'If': return this.checkIf(e, scope, true);
       case 'Match': return this.checkMatch(e, scope, true);
     }
+  }
+
+  checkRecord(e: RecordExpr, scope: Scope): Ty {
+    const fields: [string, Ty][] = [];
+    for (const f of e.fields) {
+      const t = this.checkExpr(f.value, scope);
+      if (fields.some(([n]) => n === f.name)) {
+        this.err('TN0007', `Duplicate field '${f.name}' in record.`, f.nameLoc, { fix: { description: 'Remove the duplicate field' } });
+        continue;
+      }
+      fields.push([f.name, t]);
+    }
+    return { k: 'record', fields };
+  }
+
+  checkField(e: Extract<Expr, { kind: 'Field' }>, scope: Scope): Ty {
+    const ot = this.checkExpr(e.obj, scope);
+    if (ot.k === 'unknown') return T.unknown;
+    const objText = this.txt(e.obj.loc);
+    const rec = ot.k === 'nullable' ? ot.inner : ot;
+    if (rec.k !== 'record') {
+      const useLen = ot.k === 'string' && e.name === 'length';
+      this.err('TN0002', `Type '${tyStr(ot)}' has no fields.`, e.loc, {
+        expected: 'a record value', actual: tyStr(ot),
+        fix: useLen
+          ? { description: 'Use the builtin len(s) for the length of a string', edit: { loc: e.loc, newText: `len(${objText})` } }
+          : { description: 'Only record types (type Name = { ... }) have fields; use builtin functions for strings and numbers' },
+      });
+      return T.unknown;
+    }
+    if (ot.k === 'nullable') {
+      this.err('TN3002', `'${objText}' may be null, so its fields cannot be read yet.`, e.obj.loc, {
+        expected: tyStr(rec), actual: tyStr(ot),
+        fix: { description: `Check for null first: if (${objText} !== null) { ... } (or compare with === null and return early)` },
+      });
+    }
+    const f = rec.fields.find(([n]) => n === e.name);
+    if (!f) {
+      const names = rec.fields.map(([n]) => n);
+      const guess = nearestField(e.name, names);
+      this.err('TN5004', `Field '${e.name}' does not exist on type '${tyStr(rec)}'.`, e.nameLoc, {
+        expected: `one of: ${names.join(', ')}`, actual: e.name,
+        fix: guess
+          ? { description: `Did you mean '${guess}'?`, edit: { loc: e.nameLoc, newText: guess } }
+          : { description: `Use one of the fields of ${tyStr(rec)}: ${names.join(', ')}` },
+      });
+      return T.unknown;
+    }
+    return f[1];
+  }
+
+  /** Who may call whom: client -> server crosses the network; server and shared code cannot call the client. */
+  checkSides(e: Extract<Expr, { kind: 'Call' }>, callee: Sig): void {
+    const from = this.curSide, to = callee.side;
+    if (to === 'shared' || from === to) return;
+    if (from === 'client') {
+      if (!this.boundary.has(e.name)) this.boundary.set(e.name, e.loc);
+      return;
+    }
+    if (from === 'server') {
+      this.err('TN5003', `Server code cannot call client fn '${e.name}'.`, e.loc, {
+        expected: 'a call to a server fn or a shared fn', actual: `call to client fn '${e.name}'`,
+        fix: { description: 'Return the data from the server fn and let client code do the client-side work' },
+      });
+      return;
+    }
+    this.err('TN5003', `A shared fn runs on both sides, so it cannot call ${to} fn '${e.name}'.`, e.loc, {
+      expected: 'a call to another shared fn', actual: `call to ${to} fn '${e.name}'`,
+      fix: to === 'client' && this.curFn
+        ? { description: "Mark this function 'client fn'", edit: { loc: this.zeroAt(this.curFn.fnLoc), newText: 'client ' } }
+        : { description: "Mark this function 'client fn' (to call the server over the network) or 'server fn'" },
+    });
   }
 
   checkBinary(e: Extract<Expr, { kind: 'Binary' }>, scope: Scope): Ty {
@@ -533,8 +782,20 @@ class Checker {
       const t = this.checkExpr(e.args[0], scope);
       return e.name === 'ok' ? T.result(t, T.unknown) : T.result(T.unknown, t);
     }
-    const sig: Sig | undefined = this.fns.get(e.name) ?? (PRELUDE[e.name] && { params: PRELUDE[e.name].params, ret: PRELUDE[e.name].ret });
+    const own = this.fns.get(e.name);
+    const pre = own ? undefined : PRELUDE[e.name];
+    const sig: Sig | undefined = own ?? (pre && { params: pre.params, ret: pre.ret, side: 'shared' });
     const argTys = e.args.map((a) => this.checkExpr(a, scope));
+    if (own) this.checkSides(e, own);
+    if (pre?.side === 'server' && this.curSide !== 'server') {
+      const shared = this.curSide === 'shared';
+      this.err('TN5001', `'${e.name}' can only be used in a server fn; secrets never reach the client.`, e.loc, {
+        expected: 'server-only code inside a server fn', actual: `${e.name}(...) in a ${this.curSide} fn`,
+        fix: shared && this.curFn
+          ? { description: "Mark this function 'server fn'", edit: { loc: this.zeroAt(this.curFn.fnLoc), newText: 'server ' } }
+          : { description: "Move this into a 'server fn' that returns only what the client needs, and call that from here" },
+      });
+    }
     if (!sig) {
       const s = nearest(e.name, [...this.fns.keys(), ...Object.keys(PRELUDE), 'ok', 'err']);
       this.err('TN0004', `Cannot find name '${e.name}'.`, e.nameLoc, {
@@ -554,6 +815,6 @@ class Checker {
   }
 }
 
-export function check(program: Program, file: string, src: string): Diagnostic[] {
+export function check(program: Program, file: string, src: string): CheckResult {
   return new Checker(src, file).run(program);
 }

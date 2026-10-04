@@ -3,7 +3,7 @@
 // described in ast.ts. If it finds a typo, it writes it down and keeps going so one run
 // can report many mistakes.
 
-import { Arm, Block, Expr, Fn, IfExpr, MatchExpr, Param, Program, Stmt, TypeNode } from './ast.ts';
+import { Arm, Block, Expr, Fn, IfExpr, MatchExpr, Param, Program, RecordField, Side, Stmt, TypeDecl, TypeField, TypeNode } from './ast.ts';
 import { Diagnostic, Loc, join, mkDiag } from './diagnostics.ts';
 import { Token, lex } from './lexer.ts';
 
@@ -88,9 +88,17 @@ class Parser {
   }
 
   // ---- program / functions
+  isFnKw(o = 0): boolean { return this.isKw('fn', o) || this.isKw('function', o); }
+  isSideKw(o = 0): boolean { return (this.isKw('server', o) || this.isKw('client', o)) && this.isFnKw(o + 1); }
+  isTypeKw(): boolean { return (this.isKw('type') || this.isKw('interface')) && this.peek(1).kind === 'ident'; }
+  /** True at the start of something that can appear at the top level of a file. */
+  atTopStart(): boolean { return this.isFnKw() || this.isSideKw() || this.isTypeKw() || this.isKw('export'); }
+
   parseProgram(): Program {
     const fns: Fn[] = [];
+    const types: TypeDecl[] = [];
     while (!this.eof()) {
+      const startPos = this.p;
       try {
         if (this.isKw('export')) {
           const t = this.next();
@@ -99,22 +107,48 @@ class Parser {
             fix: { description: "Remove 'export'", edit: { loc: { ...t.loc, endCol: t.loc.endCol + 1, eo: t.loc.eo + 1 }, newText: '' } },
           }));
         }
-        if (this.isKw('fn') || this.isKw('function')) fns.push(this.parseFn());
+        if (this.isTypeKw()) types.push(this.parseTypeDecl());
+        else if (this.isSideKw()) { const side = this.next(); fns.push(this.parseFn(side.text as Side, side.loc)); }
+        else if (this.isFnKw()) fns.push(this.parseFn('shared'));
         else {
           const t = this.peek();
-          this.fail(`Unexpected ${this.desc(t)}; expected a function declaration.`, t.loc, "'fn'", this.desc(t));
+          this.fail(`Unexpected ${this.desc(t)}; expected a function or type declaration.`, t.loc, "'fn', 'server fn', 'client fn' or 'type'", this.desc(t));
         }
       } catch (e) {
         if (!(e instanceof ParseError)) throw e;
         this.diags.push(e.diag);
-        if (!this.isKw('fn') && !this.isKw('function')) this.next();
-        while (!this.eof() && !this.isKw('fn') && !this.isKw('function') && !this.isKw('export')) this.next();
+        if (this.p === startPos || !this.atTopStart()) this.next();
+        while (!this.eof() && !this.atTopStart()) this.next();
       }
     }
-    return { fns };
+    return { types, fns };
   }
 
-  parseFn(): Fn {
+  /** `type Name = { field: type, ... }` (a TypeScript-style `interface Name { ... }` is accepted with a fix). */
+  parseTypeDecl(): TypeDecl {
+    const kw = this.next();
+    const name = this.expectIdent('type name');
+    if (kw.text === 'interface') {
+      this.diags.push(mkDiag('TN0003', "Use 'type Name = { ... }' to declare a record type.", kw.loc, {
+        expected: `type ${name.text} = { ... }`, actual: `interface ${name.text} { ... }`,
+        fix: { description: "Replace 'interface Name' with 'type Name ='", edit: { loc: join(kw.loc, name.loc), newText: `type ${name.text} =` } },
+      }));
+      this.eatP('=');
+    } else this.expectP('=');
+    this.expectP('{');
+    const fields: TypeField[] = [];
+    while (!this.isP('}')) {
+      const f = this.expectIdent('field name');
+      this.expectP(':');
+      fields.push({ name: f.text, nameLoc: f.loc, typeNode: this.parseType() });
+      if (!this.eatP(',') && !this.eatP(';')) break;
+    }
+    const close = this.expectP('}');
+    this.eatP(';');
+    return { name: name.text, nameLoc: name.loc, fields, loc: join(kw.loc, close.loc) };
+  }
+
+  parseFn(side: Side, sideLoc?: Loc): Fn {
     const start = this.next();
     if (start.text === 'function') {
       this.diags.push(mkDiag('TN0003', "Use 'fn' to declare functions.", start.loc, {
@@ -152,7 +186,7 @@ class Parser {
       }
       body.tail = undefined;
     }
-    return { name: name.text, nameLoc: name.loc, params, retNode, rparenLoc: rparen.loc, body, loc: join(start.loc, body.loc) };
+    return { side, fnLoc: start.loc, name: name.text, nameLoc: name.loc, params, retNode, rparenLoc: rparen.loc, body, loc: join(sideLoc ?? start.loc, body.loc) };
   }
 
   // ---- types
@@ -288,8 +322,43 @@ class Parser {
     return this.parsePrimary();
   }
 
+  /** An atom followed by any number of `.field` accesses. */
   parsePrimary(): Expr {
+    let e = this.parseAtom();
+    while (this.isP('.')) {
+      this.next();
+      const name = this.expectIdent('field name');
+      if (this.isP('(')) {
+        this.fail(`Method calls are not supported; use a builtin function instead of '.${name.text}(...)'.`, name.loc,
+          'a builtin such as len(s), toUpper(s), contains(s, x)', `.${name.text}(...)`, 'TN0003');
+      }
+      e = { kind: 'Field', obj: e, name: name.text, nameLoc: name.loc, loc: join(e.loc, name.loc) };
+    }
+    return e;
+  }
+
+  /** `{ a: 1, b }` — only reached in expression position, where a block cannot appear. */
+  parseRecord(): Expr {
+    const open = this.next();
+    const fields: RecordField[] = [];
+    while (!this.isP('}')) {
+      const n = this.expectIdent('field name');
+      const value: Expr = this.eatP(':') ? this.parseExpr() : { kind: 'Ident', name: n.text, loc: n.loc };
+      fields.push({ name: n.text, nameLoc: n.loc, value });
+      if (!this.eatP(',')) break;
+    }
+    const close = this.expectP('}');
+    return { kind: 'Record', fields, loc: join(open.loc, close.loc) };
+  }
+
+  /** In a match arm, `{` usually opens a block; `{ name: ...` or `{ name, ...` can only be a record value. */
+  recordAhead(): boolean {
+    return this.isP('{') && this.peek(1).kind === 'ident' && !RESERVED.has(this.peek(1).text) && (this.isP(':', 2) || this.isP(',', 2));
+  }
+
+  parseAtom(): Expr {
     const t = this.peek();
+    if (t.kind === 'punct' && t.text === '{') return this.parseRecord();
     if (t.kind === 'num') { this.next(); return { kind: 'Num', value: t.value as number, loc: t.loc }; }
     if (t.kind === 'str') { this.next(); return { kind: 'Str', value: t.value as string, loc: t.loc }; }
     if (t.kind === 'punct' && t.text === '(') {
@@ -350,7 +419,7 @@ class Parser {
       this.expectP(')');
       this.expectP('=>');
       let body: Block;
-      if (this.isP('{')) body = this.parseBlock();
+      if (this.isP('{') && !this.recordAhead()) body = this.parseBlock();
       else {
         const e = this.parseExpr();
         body = { kind: 'Block', stmts: [], tail: e, loc: e.loc, closeLoc: e.loc };

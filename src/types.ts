@@ -1,12 +1,13 @@
 // This file describes the kinds of values in Tensium (number, string, boolean, void, null,
-// Result and "maybe null") and the rules for when one kind can be used where another is
-// expected. For example, a plain number fits where "number or null" is wanted, but not
-// the other way around.
+// Result, "maybe null", records with named fields, and server-only secrets) and the rules for
+// when one kind can be used where another is expected. For example, a plain number fits where
+// "number or null" is wanted, but not the other way around.
 
 export type Ty =
-  | { k: 'number' | 'string' | 'boolean' | 'void' | 'null' | 'unknown' }
+  | { k: 'number' | 'string' | 'boolean' | 'void' | 'null' | 'unknown' | 'secret' }
   | { k: 'result'; ok: Ty; err: Ty }
-  | { k: 'nullable'; inner: Ty };
+  | { k: 'nullable'; inner: Ty }
+  | { k: 'record'; name?: string; fields: [string, Ty][] };
 
 export const T = {
   number: { k: 'number' } as Ty,
@@ -15,6 +16,7 @@ export const T = {
   void: { k: 'void' } as Ty,
   null: { k: 'null' } as Ty,
   unknown: { k: 'unknown' } as Ty,
+  secret: { k: 'secret' } as Ty,
   result: (ok: Ty, err: Ty): Ty => ({ k: 'result', ok, err }),
   nullable: (inner: Ty): Ty => ({ k: 'nullable', inner }),
 };
@@ -24,7 +26,20 @@ export function tyStr(t: Ty): string {
     case 'result': return `Result<${tyStr(t.ok)}, ${tyStr(t.err)}>`;
     case 'nullable': return `${tyStr(t.inner)} | null`;
     case 'unknown': return '_';
+    case 'secret': return 'Secret';
+    case 'record': return t.name ?? `{ ${t.fields.map(([n, f]) => `${n}: ${tyStr(f)}`).join(', ')} }`;
     default: return t.k;
+  }
+}
+
+/** True if a value of this type could carry a secret (directly or inside a record or Result). */
+export function containsSecret(t: Ty): boolean {
+  switch (t.k) {
+    case 'secret': return true;
+    case 'result': return containsSecret(t.ok) || containsSecret(t.err);
+    case 'nullable': return containsSecret(t.inner);
+    case 'record': return t.fields.some(([, f]) => containsSecret(f));
+    default: return false;
   }
 }
 
@@ -33,6 +48,7 @@ export function isComplete(t: Ty): boolean {
     case 'unknown': return false;
     case 'result': return isComplete(t.ok) && isComplete(t.err);
     case 'nullable': return isComplete(t.inner);
+    case 'record': return t.fields.every(([, f]) => isComplete(f));
     default: return true;
   }
 }
@@ -46,6 +62,12 @@ export function assignable(a: Ty, e: Ty): boolean {
   }
   if (a.k === 'nullable') return false;
   if (a.k === 'result' && e.k === 'result') return assignable(a.ok, e.ok) && assignable(a.err, e.err);
+  if (a.k === 'record' && e.k === 'record') {
+    // records match by shape: exactly the same field names, each one assignable
+    if (a.fields.length !== e.fields.length) return false;
+    const want = new Map(e.fields);
+    return a.fields.every(([n, f]) => want.has(n) && assignable(f, want.get(n)!));
+  }
   return a.k === e.k;
 }
 
@@ -63,6 +85,11 @@ export function unify(a: Ty, b: Ty): Ty | null {
   if (a.k === 'result' && b.k === 'result') {
     const ok = unify(a.ok, b.ok), err = unify(a.err, b.err);
     return ok && err ? T.result(ok, err) : null;
+  }
+  if (a.k === 'record' && b.k === 'record') {
+    if (assignable(a, b) && assignable(b, a)) return a.name ? a : b;
+    if (assignable(a, b)) return b;
+    return assignable(b, a) ? a : null;
   }
   return a.k === b.k ? a : null;
 }

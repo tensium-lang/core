@@ -1,11 +1,53 @@
 // This file writes the short guide to the Tensium language that every helper in the
-// experiment gets to read. The list of ready-made tools in the guide is copied straight from
-// src/prelude.ts, so the guide always matches the real language.
+// experiment gets to read, including how records and the client/server split are written.
+// The list of ready-made tools in the guide is copied straight from src/prelude.ts, so the
+// guide always matches the real language.
 
 import { PRELUDE } from '../src/prelude.ts';
 import { tyStr } from '../src/types.ts';
 
 export type ReferenceKind = 'full' | 'terse';
+
+const builtinList = (): string => Object.entries(PRELUDE)
+  .map(([name, b]) => `- \`${name}(${b.params.map(tyStr).join(', ')}): ${tyStr(b.ret)}\`${b.side === 'server' ? ' (server fn only)' : ''}`)
+  .join('\n');
+
+/** Records and the client/server boundary: syntax only, the same text in both reference styles. */
+const BOUNDARY = `## Records
+
+\`\`\`
+type User = { id: number, name: string, email: string | null }
+
+fn label(u: User): string {
+  let copy: User = { id: u.id, name: u.name, email: null };
+  return copy.name;
+}
+\`\`\`
+
+- Declare a record type with \`type Name = { field: type, ... }\`. Build a value with \`{ field: value, ... }\` and read a field with \`value.field\`.
+- A record value must have exactly the fields of its type. Strings and numbers have no fields or methods; use the builtins.
+
+## Client and server
+
+\`\`\`
+server fn getUser(id: number): Result<User, string> {
+  let key = secret("DB_KEY");
+  if (id == 1) { return ok({ id: 1, name: "Ann", email: null }); }
+  return err("no such user");
+}
+
+client fn userLabel(id: number): string {
+  match getUser(id) {
+    ok(u) => { return u.name; }
+    err(e) => { return "error: " + e; }
+  }
+}
+\`\`\`
+
+- \`server fn\` runs on the server, \`client fn\` runs on the client, and a plain \`fn\` is a helper that runs on either side.
+- A \`client fn\` calls a \`server fn\` like any other function; the compiler turns that call into a network request. There is no \`async\` or \`await\`.
+- \`secret("NAME")\` gives a \`Secret\`, which only server code can hold.
+`;
 
 /**
  * The language reference handed to every agent, identical across arms. Builtins are generated from the prelude.
@@ -13,9 +55,7 @@ export type ReferenceKind = 'full' | 'terse';
  */
 export function languageReference(kind: ReferenceKind = 'full'): string {
   if (kind === 'terse') return terseReference();
-  const builtins = Object.entries(PRELUDE)
-    .map(([name, b]) => `- \`${name}(${b.params.map(tyStr).join(', ')}): ${tyStr(b.ret)}\``)
-    .join('\n');
+  const builtins = builtinList();
   return `# Tensium language reference
 
 Tensium (\`.tn\`) is a small, strict, statically-checked language. A program is a list of function declarations.
@@ -62,6 +102,7 @@ match parseInt(s) {
 
 \`T | null\` values must be checked before use. These narrow \`x\` to \`T\`: \`if (x !== null) {...}\`, \`if (x === null) { return ...; }\` followed by the rest of the function, and \`x !== null && ...\`.
 
+${BOUNDARY}
 ## Builtins
 
 ${builtins}
@@ -72,9 +113,7 @@ ${builtins}
 }
 
 function terseReference(): string {
-  const builtins = Object.entries(PRELUDE)
-    .map(([name, b]) => `- \`${name}(${b.params.map(tyStr).join(', ')}): ${tyStr(b.ret)}\``)
-    .join('\n');
+  const builtins = builtinList();
   return `# Tensium syntax sheet
 
 Tensium (\`.tn\`) programs are lists of function declarations. Every file starts with a \`//\` comment saying in plain words what the file does.
@@ -102,6 +141,7 @@ fn pick(r: Result<number, string>): number {
 - Operators: \`+ - * / %\`, \`< > <= >=\`, \`== != === !==\`, \`&& || !\`. Literals: numbers, \`"strings"\`, \`true\`, \`false\`, \`null\`. Comments: \`//\`.
 - Functions can call each other in any order and can recurse. There are no loops, arrays, or objects.
 
+${BOUNDARY}
 ## Builtins
 
 ${builtins}

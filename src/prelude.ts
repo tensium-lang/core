@@ -6,7 +6,13 @@
 import { T, Ty } from './types.ts';
 
 /** Builtins: signature and TypeScript implementation live together so they cannot drift. */
-export interface Builtin { params: Ty[]; ret: Ty; impl: string }
+export interface Builtin {
+  params: Ty[];
+  ret: Ty;
+  impl: string;
+  /** Server-only builtins can only be called from a `server fn`, and are never written into the client file. */
+  side?: 'server';
+}
 
 const S = T.string, N = T.number, B = T.boolean;
 
@@ -33,4 +39,13 @@ export const PRELUDE: Record<string, Builtin> = {
   min: { params: [N, N], ret: N, impl: '(a: number, b: number): number => Math.min(a, b)' },
   max: { params: [N, N], ret: N, impl: '(a: number, b: number): number => Math.max(a, b)' },
   floor: { params: [N], ret: N, impl: '(n: number): number => Math.floor(n)' },
+  // ---- server-only
+  secret: {
+    params: [S], ret: T.secret, side: 'server',
+    impl: "(name: string): Secret => (process.env[name] ?? '') as Secret",
+  },
+  sign: {
+    params: [T.secret, S], ret: S, side: 'server',
+    impl: "(key: Secret, message: string): string => createHmac('sha256', key).update(message).digest('hex').slice(0, 16)",
+  },
 };

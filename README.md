@@ -10,7 +10,8 @@ This repo is a **minimal proof of concept** for one thesis: agents write more co
 
 ```
 npm install
-npm test          # 31 tests: one per diagnostic code, narrowing, fix-edits, emitted-TS validity (tsc --strict), and the header rule across the whole repo
+npm test          # 48 tests: one per diagnostic code, narrowing, fix-edits, the client/server boundary (incl. a real HTTP round trip),
+                  # emitted-TS validity under tsc --strict, and the header rule across the whole repo
 ```
 
 ## The checker
@@ -37,6 +38,7 @@ Each diagnostic: `{ code, severity, message, span: {file, startLine, startCol, e
 | TN3001 | implicit or explicit `any` (missing param/return annotation, un-inferable `let`) |
 | TN3002 | `null`/`undefined` not handled (`T \| null` used as `T` without a check; `undefined`) |
 | TN4001 / TN4002 | **file header rule**: every `.tn` file must start with a `//` comment explaining, in plain words a 5th grader could follow, what the file does (missing / too short or still has `TODO`) |
+| TN5001–5006 | **client/server boundary** (see below): secrets outside server code, secrets crossing the wire, wrong-side calls, unknown or missing record fields, boundary calls that don't return `Result<T, string>` |
 | TN0001–0011 | syntax, type mismatch, non-canonical syntax, undefined name, arity, missing return, duplicates, … |
 
 ### House rule: every file starts with a plain-words note
@@ -45,6 +47,49 @@ In the language: a `.tn` file with no top comment doesn't compile (TN4001), and 
 
 Null narrowing supports `if (x !== null)`, `if (x === null) { return …; }` (rest of block), `&&`/`||`, and else-branches.
 The parser recovers from errors, so one check reports everything it can find.
+
+## The client/server boundary
+
+One `.tn` file holds both halves of an app. Record types are declared once, so the two sides cannot disagree about them.
+
+```
+type User = { id: number, name: string }
+
+server fn getUser(id: number): Result<User, string> {   // runs on the server
+  let key = secret("DB_KEY");                            // Secret: server-only
+  ...
+}
+
+client fn userLabel(id: number): string {                // runs on the client
+  match getUser(id) {                                    // this call crosses the network
+    ok(u) => { return u.name; }
+    err(e) => { return "error: " + e; }
+  }
+}
+```
+
+```
+npx tsx src/cli.ts build examples/shop.tn -o out/shop    # writes out/shop.server.ts and out/shop.client.ts
+```
+
+- **Sides:** `server fn`, `client fn`, and plain `fn` (a helper that runs on either side). A `client fn` calling a `server fn` is the boundary.
+- **No `async`/`await` in the language.** The compiler emits every sided function as `async` and inserts every `await` itself.
+- **Real HTTP.** The server file exports `__serve(port)` (`POST /rpc/<name>`, JSON array of arguments); the client file exports `__connect(url)` and uses `fetch`.
+- **Only what the client calls is reachable.** Other server functions get no route. Arguments are checked against their types on arrival, and responses are checked on the client, so a bad or stale peer becomes `err("network: ...")` instead of a wrong-typed value.
+- **Secrets stay on the server.** The client file contains no server function bodies, no server-only builtins and no secret names.
+
+| Code | Fires when | Mechanical fix |
+|---|---|---|
+| TN5001 | client or shared code uses `secret(...)`, a server-only builtin, or a type that holds a `Secret` | for a shared fn: insert `server ` |
+| TN5002 | a server fn that client code calls takes or returns a `Secret` | – |
+| TN5003 | server code calls a `client fn`, or a shared fn calls a sided fn | shared → client: insert `client ` |
+| TN5004 | a field doesn't exist on the record type | rename to the obvious candidate, when there is exactly one |
+| TN5005 | a record value has unknown or missing fields | rename, as above |
+| TN5006 | a server fn that client code calls doesn't return `Result<T, string>` (a network call can fail, and that failure must be a value) | wrap the return type; returns then get an `ok(...)` edit |
+
+Renaming a field in a shared type flags every stale use on both sides in one check, and `tn fix` repairs them (see `test/boundary.test.ts`).
+
+Limits of this version: calls run one after another (no parallel server calls); the error type across the boundary is fixed to `string`; no effect tracking beyond the server/client marker; server-only builtins are just `secret` and `sign`.
 
 ## The experiment
 
