@@ -1,3 +1,5 @@
+<!-- This file lists the rules the team follows when changing the invoicing app, so that everyone writes code the same careful way. -->
+
 # Conventions
 
 These are the rules this codebase follows. Every change is expected to follow them.

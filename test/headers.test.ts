@@ -8,15 +8,16 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const SKIP_DIRS = new Set(['node_modules', 'runs', '.git']);
-// JSON cannot hold comments, and lock files are written by npm, not by us.
-const SKIP_FILES = new Set(['package.json', 'package-lock.json']);
+// JSON cannot hold comments; lock files are written by npm and cargo, not by us; .patch files are written by diff.
+const SKIP_FILES = new Set(['package.json', 'package-lock.json', 'Cargo.lock']);
+const SKIP_EXT = ['.patch'];
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (SKIP_DIRS.has(name)) continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p, out);
-    else if (!SKIP_FILES.has(name)) out.push(p);
+    else if (!SKIP_FILES.has(name) && !SKIP_EXT.some((e) => name.endsWith(e))) out.push(p);
   }
   return out;
 }
@@ -24,7 +25,7 @@ function walk(dir: string, out: string[] = []): string[] {
 function headerText(path: string, src: string): string | null {
   const body = src.startsWith('#!') ? src.slice(src.indexOf('\n') + 1) : src;
   if (path.endsWith('.md')) return /^<!--([\s\S]*?)-->/.exec(body)?.[1] ?? null;
-  const prefix = path.endsWith('.gitignore') ? '#' : '//';
+  const prefix = path.endsWith('.gitignore') || path.endsWith('.toml') ? '#' : '//';
   const lines: string[] = [];
   for (const l of body.split('\n')) {
     if (!l.startsWith(prefix)) break;
