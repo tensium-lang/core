@@ -10,7 +10,8 @@
 //
 //   init   --run ID [--arms ts,rs,tn] [--trials N] [--max-iter N] [--tasks a,b] [--model NAME] [--note TEXT]
 //   submit <workdir>      check the app, log the attempt, print the compiler's feedback
-//   score  <run ID>       run the hidden end-to-end tests on each final attempt and print the table
+//   score  <run ID> [--rebuild-rs]   run the hidden end-to-end tests on each final attempt and print the table
+//                         (--rebuild-rs: build every Rust snapshot again from its own source before testing it)
 //   verify [--arms ...] [--tasks ...]   no helpers: the starter and every reference solution, in every arm
 //   traps  [--arms ...] [--tasks ...]   no helpers: each task's tempting-but-wrong version through every arm's checker and the hidden tests
 
@@ -30,8 +31,13 @@ const CONTRIBUTING = join(BASE, 'app', 'CONTRIBUTING.md');
 const TEST_KEY = 'test-webhook-secret-9c1d';
 /** rustup was installed with --no-modify-path, so cargo is found here rather than on PATH. */
 const CARGO = join(homedir(), '.cargo', 'bin', 'cargo');
-/** One build folder for every Rust submission, so the dependencies are compiled once. */
-const TARGET = join(RUNS, '_target', 'rs');
+/**
+ * Rust builds: every work directory gets its own build folder, cloned (copy-on-write, so instant and
+ * nearly free on APFS) from a seed that holds only the compiled dependencies. Sharing one build
+ * folder between work directories does not work: cargo gives the same fingerprint to a crate of the
+ * same name at two paths and happily reuses the other directory's program without compiling yours.
+ */
+const SEED = join(RUNS, '_target', 'rs-seed');
 const LOCK = join(RUNS, '_target', 'rs.lock');
 
 type Arm = 'ts' | 'rs' | 'tn';
@@ -127,11 +133,11 @@ function withBuildLock<T>(fn: () => T): T {
 
 interface CargoMsg { reason: string; message?: { rendered?: string; level: string; code: { code: string } | null; message: string } }
 
-function cargo(args: string[], dir: string): { ok: boolean; codes: string[]; text: string } {
+function cargo(args: string[], dir: string, target: string): { ok: boolean; codes: string[]; text: string } {
   // cargo's own flags go before `--`; anything after it is for clippy-driver
   const dash = args.indexOf('--');
   const argv2 = dash < 0 ? [...args, '--message-format=json'] : [...args.slice(0, dash), '--message-format=json', ...args.slice(dash)];
-  const r = spawnSync(CARGO, argv2, { cwd: dir, encoding: 'utf8', env: { ...process.env, CARGO_TARGET_DIR: TARGET, PATH: `${dirname(CARGO)}:${process.env.PATH}` }, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync(CARGO, argv2, { cwd: dir, encoding: 'utf8', env: { ...process.env, CARGO_TARGET_DIR: target, PATH: `${dirname(CARGO)}:${process.env.PATH}` }, maxBuffer: 64 * 1024 * 1024 });
   const codes: string[] = [];
   const text: string[] = [];
   for (const line of r.stdout.split('\n')) {
@@ -149,17 +155,47 @@ function cargo(args: string[], dir: string): { ok: boolean; codes: string[]; tex
   return { ok: r.status === 0 && codes.length === 0, codes, text: text.join('\n') };
 }
 
-/** cargo build, then clippy with warnings as errors; on success the two programs are copied to <binDir>. */
-function checkRs(dir: string, binDir: string): Check {
-  return withBuildLock(() => {
-    const build = cargo(['build'], dir);
-    if (!build.ok) return { ok: false, codes: build.codes, feedback: build.text };
-    const clippy = cargo(['clippy', '--', '-D', 'warnings'], dir);
-    if (!clippy.ok) return { ok: false, codes: clippy.codes, feedback: clippy.text };
-    mkdirSync(binDir, { recursive: true });
-    for (const b of ['server', 'client']) cpSync(join(TARGET, 'debug', b), join(binDir, b));
-    return { ok: true, codes: [], feedback: '' };
+/** Builds the dependencies once, from the starter, and throws away the starter's own crates so nothing of them is ever reused. */
+function ensureSeed(): void {
+  if (existsSync(join(SEED, 'debug', 'deps'))) return;
+  withBuildLock(() => {
+    if (existsSync(join(SEED, 'debug', 'deps'))) return;
+    const src = join(RUNS, '_target', 'rs-seed-src');
+    rmSync(src, { recursive: true, force: true });
+    copySource(STARTER.rs, src);
+    for (const args of [['build'], ['clippy', '--', '-D', 'warnings']]) {
+      const r = cargo(args, src, SEED);
+      if (!r.ok) throw new Error('could not build the Rust seed: ' + r.text.slice(0, 500));
+    }
+    for (const sub of ['deps', '.fingerprint']) {
+      for (const f of readdirSync(join(SEED, 'debug', sub))) if (/^(server|client|shared)-/.test(f)) rmSync(join(SEED, 'debug', sub, f), { recursive: true, force: true });
+    }
+    for (const f of ['server', 'client', 'incremental']) rmSync(join(SEED, 'debug', f), { recursive: true, force: true });
+    rmSync(src, { recursive: true, force: true });
   });
+}
+
+/** The build folder of one work directory (or snapshot): a clone of the seed, made on first use. */
+function targetFor(dir: string): string {
+  const target = join(dir, 'target');
+  if (!existsSync(target)) {
+    ensureSeed();
+    const r = spawnSync('cp', ['-c', '-R', SEED, target], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error('could not clone the Rust seed: ' + r.stderr);
+  }
+  return target;
+}
+
+/** cargo build, then clippy with warnings as errors, in the directory's own build folder; on success the two programs are copied to <binDir>. */
+function checkRs(dir: string, binDir: string): Check {
+  const target = targetFor(dir);
+  const build = cargo(['build'], dir, target);
+  if (!build.ok) return { ok: false, codes: build.codes, feedback: build.text };
+  const clippy = cargo(['clippy', '--', '-D', 'warnings'], dir, target);
+  if (!clippy.ok) return { ok: false, codes: clippy.codes, feedback: clippy.text };
+  mkdirSync(binDir, { recursive: true });
+  for (const b of ['server', 'client']) cpSync(join(target, 'debug', b), join(binDir, b));
+  return { ok: true, codes: [], feedback: '' };
 }
 
 function checkTn(dir: string, outDir: string): Check {
@@ -327,11 +363,17 @@ function score(): void {
       task: meta.task, arm: meta.arm, trial: meta.trial, attempts: attempts.length, clean: !!last?.ok, correct: false,
       firstTryClean: !!attempts[0]?.ok, codes: attempts.flatMap((a) => a.codes),
     };
-    if (last?.ok) {
+    let rebuilt = true;
+    if (last?.ok && meta.arm === 'rs' && (argv.includes('--rebuild-rs') || !existsSync(join(dir, last.dir, 'bin', 'server')))) {
+      // the programs are built again from the snapshot's own source, in its own build folder
+      const b = checkRs(join(dir, last.dir), join(dir, last.dir, 'bin'));
+      if (!b.ok) { rebuilt = false; row.clean = false; row.testError = 'did not compile when rebuilt from its snapshot: ' + [...new Set(b.codes)].slice(0, 3).join(', '); }
+    }
+    if (last?.ok && rebuilt) {
       const r = e2e(meta.arm, join(dir, last.dir), join(TASKS, meta.task, 'tests.ts'));
       row.correct = r.ok;
       row.testError = r.error;
-    } else row.testError = last ? 'never passed its own compiler' : 'no submission';
+    } else if (!last?.ok) row.testError = last ? 'never passed its own compiler' : 'no submission';
     rows.push(row);
     console.error(`${meta.task} ${meta.arm} t${meta.trial}: ${row.clean ? (row.correct ? 'correct' : 'clean but broken: ' + row.testError) : row.testError}`);
   }
