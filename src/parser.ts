@@ -3,13 +3,13 @@
 // described in ast.ts. If it finds a typo, it writes it down and keeps going so one run
 // can report many mistakes.
 
-import { Arm, Block, Expr, Fn, IfExpr, MatchExpr, Param, Program, RecordField, Side, Stmt, TypeDecl, TypeField, TypeNode } from './ast.ts';
+import { Arm, Block, EnumDecl, Expr, Fn, IfExpr, MatchExpr, NewtypeDecl, Param, Program, RecordField, Side, Stmt, TypeDecl, TypeField, TypeNode } from './ast.ts';
 import { Diagnostic, Loc, join, mkDiag } from './diagnostics.ts';
 import { Token, lex } from './lexer.ts';
 
 const RESERVED = new Set([
-  'fn', 'function', 'let', 'const', 'var', 'return', 'if', 'else', 'match', 'throw', 'try', 'catch',
-  'true', 'false', 'null', 'undefined', 'export', 'class', 'async', 'await', 'new',
+  'fn', 'function', 'let', 'const', 'var', 'mut', 'return', 'if', 'else', 'match', 'for', 'while', 'in', 'throw', 'try', 'catch',
+  'true', 'false', 'null', 'undefined', 'export', 'class', 'async', 'await', 'new', 'enum', 'newtype',
 ]);
 
 const BINOPS: Record<string, number> = {
@@ -61,7 +61,7 @@ class Parser {
     if (this.isP(text)) return this.next();
     const t = this.peek();
     // report at the end of the previous token, like tsc does for missing punctuation
-    const loc = text === ';' || text === ')' || text === '}' ? after(this.prev().loc) : t.loc;
+    const loc = text === ';' || text === ')' || text === '}' || text === ']' ? after(this.prev().loc) : t.loc;
     return this.fail(`'${text}' expected.`, loc, `'${text}'`, this.desc(t));
   }
 
@@ -90,13 +90,15 @@ class Parser {
   // ---- program / functions
   isFnKw(o = 0): boolean { return this.isKw('fn', o) || this.isKw('function', o); }
   isSideKw(o = 0): boolean { return (this.isKw('server', o) || this.isKw('client', o)) && this.isFnKw(o + 1); }
-  isTypeKw(): boolean { return (this.isKw('type') || this.isKw('interface')) && this.peek(1).kind === 'ident'; }
+  isTypeKw(): boolean { return (this.isKw('type') || this.isKw('interface') || this.isKw('enum') || this.isKw('newtype')) && this.peek(1).kind === 'ident'; }
   /** True at the start of something that can appear at the top level of a file. */
   atTopStart(): boolean { return this.isFnKw() || this.isSideKw() || this.isTypeKw() || this.isKw('export'); }
 
   parseProgram(): Program {
     const fns: Fn[] = [];
     const types: TypeDecl[] = [];
+    const enums: EnumDecl[] = [];
+    const newtypes: NewtypeDecl[] = [];
     while (!this.eof()) {
       const startPos = this.p;
       try {
@@ -107,12 +109,14 @@ class Parser {
             fix: { description: "Remove 'export'", edit: { loc: { ...t.loc, endCol: t.loc.endCol + 1, eo: t.loc.eo + 1 }, newText: '' } },
           }));
         }
-        if (this.isTypeKw()) types.push(this.parseTypeDecl());
+        if (this.isKw('enum') && this.peek(1).kind === 'ident') enums.push(this.parseEnumDecl());
+        else if (this.isKw('newtype') && this.peek(1).kind === 'ident') newtypes.push(this.parseNewtypeDecl());
+        else if (this.isTypeKw()) types.push(this.parseTypeDecl());
         else if (this.isSideKw()) { const side = this.next(); fns.push(this.parseFn(side.text as Side, side.loc)); }
         else if (this.isFnKw()) fns.push(this.parseFn('shared'));
         else {
           const t = this.peek();
-          this.fail(`Unexpected ${this.desc(t)}; expected a function or type declaration.`, t.loc, "'fn', 'server fn', 'client fn' or 'type'", this.desc(t));
+          this.fail(`Unexpected ${this.desc(t)}; expected a function or type declaration.`, t.loc, "'fn', 'server fn', 'client fn', 'type', 'enum' or 'newtype'", this.desc(t));
         }
       } catch (e) {
         if (!(e instanceof ParseError)) throw e;
@@ -121,7 +125,7 @@ class Parser {
         while (!this.eof() && !this.atTopStart()) this.next();
       }
     }
-    return { types, fns };
+    return { types, enums, newtypes, fns };
   }
 
   /** `type Name = { field: type, ... }` (a TypeScript-style `interface Name { ... }` is accepted with a fix). */
@@ -146,6 +150,33 @@ class Parser {
     const close = this.expectP('}');
     this.eatP(';');
     return { name: name.text, nameLoc: name.loc, fields, loc: join(kw.loc, close.loc) };
+  }
+
+  /** `enum Status { Draft, Sent, Paid }` */
+  parseEnumDecl(): EnumDecl {
+    const kw = this.next();
+    const name = this.expectIdent('enum name');
+    this.expectP('{');
+    const members: EnumDecl['members'] = [];
+    while (!this.isP('}')) {
+      const m = this.expectIdent('member name');
+      if (this.isP('=') || this.isP('(')) this.fail('Enum members are plain names; they carry no values.', this.peek().loc, "',' or '}'", this.desc(this.peek()));
+      members.push({ name: m.text, loc: m.loc });
+      if (!this.eatP(',')) break;
+    }
+    const close = this.expectP('}');
+    this.eatP(';');
+    return { name: name.text, nameLoc: name.loc, members, loc: join(kw.loc, close.loc) };
+  }
+
+  /** `newtype Cents = number;` */
+  parseNewtypeDecl(): NewtypeDecl {
+    const kw = this.next();
+    const name = this.expectIdent('newtype name');
+    this.expectP('=');
+    const typeNode = this.parseType();
+    this.expectSemi();
+    return { name: name.text, nameLoc: name.loc, typeNode, loc: join(kw.loc, typeNode.loc) };
   }
 
   parseFn(side: Side, sideLoc?: Loc): Fn {
@@ -200,8 +231,23 @@ class Parser {
       const err = this.parseType();
       const close = this.expectP('>');
       ty = { kind: 'TypeResult', ok, err, loc: join(t.loc, close.loc) };
+    } else if (t.text === 'List' && this.isP('<')) {
+      this.next();
+      const elem = this.parseType();
+      const close = this.expectP('>');
+      ty = { kind: 'TypeList', elem, loc: join(t.loc, close.loc) };
     } else {
       ty = { kind: 'TypeName', name: t.text, loc: t.loc };
+    }
+    if (this.isP('[')) {
+      const open = this.next();
+      const close = this.expectP(']');
+      this.diags.push(mkDiag('TN0003', `Use 'List<${this.slice(ty.loc)}>' for a list type.`, join(ty.loc, close.loc), {
+        expected: `List<${this.slice(ty.loc)}>`, actual: `${this.slice(ty.loc)}[]`,
+        fix: { description: "Write the list type as List<T>", edit: { loc: join(ty.loc, close.loc), newText: `List<${this.slice(ty.loc)}>` } },
+      }));
+      ty = { kind: 'TypeList', elem: ty, loc: join(ty.loc, close.loc) };
+      void open;
     }
     while (this.isP('|')) {
       this.next();
@@ -251,20 +297,21 @@ class Parser {
   parseStmt(): Stmt | { tail: Expr } {
     const t = this.peek();
     if (t.kind === 'ident') {
-      if (t.text === 'let' || t.text === 'const') {
+      if (t.text === 'let' || t.text === 'const' || t.text === 'var') {
         this.next();
-        if (t.text === 'const') {
-          this.diags.push(mkDiag('TN0003', "Use 'let' for bindings; all bindings are immutable.", t.loc, {
-            expected: "'let'", actual: "'const'",
-            fix: { description: "Replace 'const' with 'let'", edit: { loc: t.loc, newText: 'let' } },
+        if (t.text !== 'let') {
+          this.diags.push(mkDiag('TN0003', `Use 'let' for bindings (and 'let mut' for one that can change).`, t.loc, {
+            expected: "'let'", actual: `'${t.text}'`,
+            fix: { description: `Replace '${t.text}' with 'let'`, edit: { loc: t.loc, newText: 'let' } },
           }));
         }
+        const mut = this.isKw('mut') ? (this.next(), true) : false;
         const name = this.expectIdent('variable name');
         const typeNode = this.eatP(':') ? this.parseType() : undefined;
         this.expectP('=');
         const init = this.parseExpr();
         this.expectSemi();
-        return { kind: 'Let', name: name.text, nameLoc: name.loc, typeNode, init, loc: join(t.loc, init.loc) };
+        return { kind: 'Let', mut, name: name.text, nameLoc: name.loc, typeNode, init, loc: join(t.loc, init.loc) };
       }
       if (t.text === 'return') {
         this.next();
@@ -272,6 +319,29 @@ class Parser {
         this.expectSemi();
         // the statement's span includes its ';' so a replacement edit leaves no stray semicolon behind
         return { kind: 'Return', expr, loc: join(t.loc, this.endOfStmt(expr ?? { loc: t.loc })) };
+      }
+      if (t.text === 'for') {
+        this.next();
+        this.expectP('(');
+        if (this.isKw('let') || this.isKw('const')) this.next();
+        const name = this.expectIdent('loop variable');
+        if (!this.isKw('in')) {
+          this.fail("Loops are 'for (item in list) { ... }'; there is no counting for loop (use range(a, b) to make a list of numbers).",
+            this.peek().loc, "'in'", this.desc(this.peek()), 'TN0003');
+        }
+        this.next();
+        const iter = this.parseExpr();
+        this.expectP(')');
+        const body = this.parseBlock();
+        return { kind: 'For', name: name.text, nameLoc: name.loc, iter, body, loc: join(t.loc, body.loc) };
+      }
+      if (t.text === 'while') {
+        this.next();
+        this.expectP('(');
+        const cond = this.parseExpr();
+        this.expectP(')');
+        const body = this.parseBlock();
+        return { kind: 'While', cond, body, loc: join(t.loc, body.loc) };
       }
       if (t.text === 'throw') {
         this.next();
@@ -292,6 +362,17 @@ class Parser {
     }
     const blockLike = this.isKw('if') || this.isKw('match');
     const expr = blockLike ? this.parsePrimary() : this.parseExpr();
+    if (this.isP('=')) {
+      const eq = this.next();
+      if (expr.kind === 'Field') {
+        this.fail(`Record fields cannot be changed; make a changed copy instead: { ...${this.slice(expr.obj.loc)}, ${expr.name}: <new value> }.`,
+          join(expr.loc, eq.loc), 'a let binding, or a new record built with { ...old, field: value }', `assignment to '${this.slice(expr.loc)}'`, 'TN0012');
+      }
+      if (expr.kind !== 'Ident') this.fail('Only a variable can be assigned to.', expr.loc, 'variable name', this.slice(expr.loc), 'TN0012');
+      const value = this.parseExpr();
+      this.expectSemi();
+      return { kind: 'Assign', name: expr.name, nameLoc: expr.loc, expr: value, loc: join(expr.loc, this.endOfStmt(value)) };
+    }
     if (this.isP(';')) { const semi = this.next(); return { kind: 'ExprStmt', expr, loc: join(expr.loc, semi.loc) }; }
     if (this.isP('}')) return { tail: expr };
     if (blockLike) return { kind: 'ExprStmt', expr, loc: expr.loc };
@@ -325,40 +406,70 @@ class Parser {
   /** An atom followed by any number of `.field` accesses. */
   parsePrimary(): Expr {
     let e = this.parseAtom();
-    while (this.isP('.')) {
-      this.next();
-      const name = this.expectIdent('field name');
-      if (this.isP('(')) {
-        this.fail(`Method calls are not supported; use a builtin function instead of '.${name.text}(...)'.`, name.loc,
-          'a builtin such as len(s), toUpper(s), contains(s, x)', `.${name.text}(...)`, 'TN0003');
-      }
-      e = { kind: 'Field', obj: e, name: name.text, nameLoc: name.loc, loc: join(e.loc, name.loc) };
+    for (;;) {
+      if (this.isP('.')) {
+        this.next();
+        const name = this.expectIdent('field name');
+        if (this.isP('(')) {
+          this.fail(`Method calls are not supported; use a builtin function instead of '.${name.text}(...)'.`, name.loc,
+            'a builtin such as len(xs), get(xs, i), push(xs, x), toUpper(s)', `.${name.text}(...)`, 'TN0003');
+        }
+        e = { kind: 'Field', obj: e, name: name.text, nameLoc: name.loc, loc: join(e.loc, name.loc) };
+      } else if (this.isP('[')) {
+        const open = this.next();
+        const idx = this.parseExpr();
+        const close = this.expectP(']');
+        const loc = join(e.loc, close.loc);
+        this.diags.push(mkDiag('TN0003', 'Indexing with [i] is not supported; use get(list, i), which gives T | null.', loc, {
+          expected: `get(${this.slice(e.loc)}, ${this.slice(idx.loc)})`, actual: this.slice(loc),
+          fix: { description: 'Use get(list, i) and check the result for null', edit: { loc, newText: `get(${this.slice(e.loc)}, ${this.slice(idx.loc)})` } },
+        }));
+        e = { kind: 'Call', name: 'get', nameLoc: open.loc, args: [e, idx], loc };
+      } else return e;
     }
-    return e;
   }
 
-  /** `{ a: 1, b }` — only reached in expression position, where a block cannot appear. */
+  /** `{ a: 1, b }` or `{ ...base, a: 1 }` — only reached in expression position, where a block cannot appear. */
   parseRecord(): Expr {
     const open = this.next();
     const fields: RecordField[] = [];
+    let spread: Expr | undefined;
+    if (this.isP('...')) {
+      this.next();
+      spread = this.parseExpr();
+      if (!this.eatP(',') && !this.isP('}')) this.expectP(',');
+    }
     while (!this.isP('}')) {
+      if (this.isP('...')) this.fail('Only one spread is allowed in a record, and it must come first.', this.peek().loc, 'field name', "'...'");
       const n = this.expectIdent('field name');
       const value: Expr = this.eatP(':') ? this.parseExpr() : { kind: 'Ident', name: n.text, loc: n.loc };
       fields.push({ name: n.text, nameLoc: n.loc, value });
       if (!this.eatP(',')) break;
     }
     const close = this.expectP('}');
-    return { kind: 'Record', fields, loc: join(open.loc, close.loc) };
+    return { kind: 'Record', spread, fields, loc: join(open.loc, close.loc) };
   }
 
-  /** In a match arm, `{` usually opens a block; `{ name: ...` or `{ name, ...` can only be a record value. */
+  /** In a match arm, `{` usually opens a block; `{ name: ...`, `{ name, ...` or `{ ...x` can only be a record value. */
   recordAhead(): boolean {
-    return this.isP('{') && this.peek(1).kind === 'ident' && !RESERVED.has(this.peek(1).text) && (this.isP(':', 2) || this.isP(',', 2));
+    if (!this.isP('{')) return false;
+    if (this.isP('...', 1)) return true;
+    return this.peek(1).kind === 'ident' && !RESERVED.has(this.peek(1).text) && (this.isP(':', 2) || this.isP(',', 2));
   }
 
   parseAtom(): Expr {
     const t = this.peek();
     if (t.kind === 'punct' && t.text === '{') return this.parseRecord();
+    if (t.kind === 'punct' && t.text === '[') {
+      this.next();
+      const items: Expr[] = [];
+      while (!this.isP(']')) {
+        items.push(this.parseExpr());
+        if (!this.eatP(',')) break;
+      }
+      const close = this.expectP(']');
+      return { kind: 'List', items, loc: join(t.loc, close.loc) };
+    }
     if (t.kind === 'num') { this.next(); return { kind: 'Num', value: t.value as number, loc: t.loc }; }
     if (t.kind === 'str') { this.next(); return { kind: 'Str', value: t.value as string, loc: t.loc }; }
     if (t.kind === 'punct' && t.text === '(') {
@@ -413,10 +524,12 @@ class Parser {
     this.expectP('{');
     const arms: Arm[] = [];
     while (!this.isP('}')) {
-      const pat = this.expectIdent('pattern (ok or err)');
-      this.expectP('(');
-      const bind = this.expectIdent('binding name');
-      this.expectP(')');
+      const pat = this.expectIdent('pattern (ok, err or an enum member)');
+      let bind: Token | undefined;
+      if (this.eatP('(')) {
+        bind = this.expectIdent('binding name');
+        this.expectP(')');
+      }
       this.expectP('=>');
       let body: Block;
       if (this.isP('{') && !this.recordAhead()) body = this.parseBlock();
@@ -424,7 +537,7 @@ class Parser {
         const e = this.parseExpr();
         body = { kind: 'Block', stmts: [], tail: e, loc: e.loc, closeLoc: e.loc };
       }
-      arms.push({ pat: pat.text, patLoc: pat.loc, bind: bind.text, bindLoc: bind.loc, body, loc: join(pat.loc, body.loc) });
+      arms.push({ pat: pat.text, patLoc: pat.loc, bind: bind?.text, bindLoc: bind?.loc, body, loc: join(pat.loc, body.loc) });
       if (!this.eatP(',') && !this.isP('}') && body.tail && body.closeLoc === body.loc) {
         this.expectP(',');
       }

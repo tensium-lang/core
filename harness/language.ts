@@ -9,10 +9,10 @@ import { tyStr } from '../src/types.ts';
 export type ReferenceKind = 'full' | 'terse';
 
 const builtinList = (): string => Object.entries(PRELUDE)
-  .map(([name, b]) => `- \`${name}(${b.params.map(tyStr).join(', ')}): ${tyStr(b.ret)}\`${b.side === 'server' ? ' (server fn only)' : ''}`)
+  .map(([name, b]) => `- \`${b.sig ?? `${name}(${b.params.map(tyStr).join(', ')}): ${tyStr(b.ret)}`}\`${b.side === 'server' ? ' (server fn only)' : ''}`)
   .join('\n');
 
-/** Records and the client/server boundary: syntax only, the same text in both reference styles. */
+/** Records, lists, enums, newtypes and the client/server boundary: syntax only, the same text in both reference styles. */
 const BOUNDARY = `## Records
 
 \`\`\`
@@ -26,6 +26,57 @@ fn label(u: User): string {
 
 - Declare a record type with \`type Name = { field: type, ... }\`. Build a value with \`{ field: value, ... }\` and read a field with \`value.field\`.
 - A record value must have exactly the fields of its type. Strings and numbers have no fields or methods; use the builtins.
+- Records never change. To get a changed copy write \`{ ...u, name: "Bo" }\` (one spread, first, then the fields to change).
+
+## Lists, loops and bindings that change
+
+\`\`\`
+fn total(prices: List<number>): number {
+  let mut sum = 0;
+  for (p in prices) { sum = sum + p; }
+  return sum;
+}
+
+fn firstName(names: List<string>): string {
+  let first = get(names, 0);
+  if (first === null) { return "nobody"; }
+  return first;
+}
+\`\`\`
+
+- \`List<T>\` is a list; write one as \`[1, 2, 3]\` (an empty list needs a type: \`let mut xs: List<number> = [];\`).
+- Lists never change either: \`push(xs, x)\` and \`concat(xs, ys)\` give back a new list, so keep the result: \`xs = push(xs, x);\`.
+- \`get(xs, i)\` gives \`T | null\`; there is no \`xs[i]\`. \`len(xs)\` counts items; \`range(a, b)\` is the list a, a+1, ..., b-1.
+- \`for (item in list) { ... }\` and \`while (cond) { ... }\` are statements. There is no \`break\`; use \`return\` to leave early.
+- \`let\` bindings never change. A binding that must change is declared \`let mut x = ...;\` and updated with \`x = ...;\`.
+
+## Enums
+
+\`\`\`
+enum Status { Draft, Sent, Paid }
+
+fn label(s: Status): string {
+  return match s {
+    Draft => "not sent yet",
+    Sent => "waiting for payment",
+    Paid => "done",
+  };
+}
+\`\`\`
+
+- A value is written \`Status.Paid\`; compare with \`==\`. A \`match\` on an enum lists every member once, with no \`(name)\` binding and no wildcard.
+
+## Newtypes
+
+\`\`\`
+newtype Cents = number;
+newtype CustomerId = number;
+
+fn withTax(c: Cents): Cents { return Cents(floor(c.value * 108 / 100)); }
+\`\`\`
+
+- A newtype wraps one plain number, string or boolean so it cannot be mixed up with any other value: a \`Cents\` is not a \`number\`, and not a \`CustomerId\`.
+- Build one with \`Cents(250)\`; read the plain value with \`c.value\`. Arithmetic and comparison with \`<\` work on \`.value\`, not on the newtype; \`==\` compares two values of the same newtype.
 
 ## Client and server
 
@@ -74,9 +125,9 @@ fn name(a: number, b: string): Result<number, string> {
 }
 \`\`\`
 
-- Types: \`number\`, \`string\`, \`boolean\`, \`void\`, \`Result<T, E>\`, and \`T | null\` (the only union).
-- Every parameter and return type must be annotated. There is no \`any\`, no \`undefined\` (use \`null\`), no classes, no async, no arrays/objects.
-- Statements: \`let\`, \`return\`, \`if (...) {...} else {...}\`, \`match\`, and expression statements ending in \`;\`.
+- Types: \`number\`, \`string\`, \`boolean\`, \`void\`, \`Result<T, E>\`, \`List<T>\`, record types, enums, newtypes, and \`T | null\` (the only union).
+- Every parameter and return type must be annotated. There is no \`any\`, no \`undefined\` (use \`null\`), no classes, no async, no plain objects or arrays (use records and lists).
+- Statements: \`let\` / \`let mut\`, assignment to a \`let mut\`, \`return\`, \`if (...) {...} else {...}\`, \`match\`, \`for (x in list) {...}\`, \`while (...) {...}\`, and expression statements ending in \`;\`.
 - Operators: \`+ - * / %\`, \`< > <= >=\`, \`== != === !==\` (same meaning), \`&& || !\`. \`+\` also concatenates strings (string + string only; use \`str(n)\` for numbers).
 - Literals: numbers, strings (\`"..."\`), \`true\`, \`false\`, \`null\`.
 - Comments: \`// ...\`.
@@ -134,12 +185,12 @@ fn pick(r: Result<number, string>): number {
 }
 \`\`\`
 
-- Types: \`number\`, \`string\`, \`boolean\`, \`void\`, \`Result<T, E>\`, \`T | null\`.
-- Statements: \`let x = ...;\`, \`return ...;\`, \`if (...) {...} else {...}\`, expression statements.
+- Types: \`number\`, \`string\`, \`boolean\`, \`void\`, \`Result<T, E>\`, \`List<T>\`, \`T | null\`, and the record, enum and newtype declarations below.
+- Statements: \`let x = ...;\`, \`let mut x = ...;\` then \`x = ...;\`, \`return ...;\`, \`if (...) {...} else {...}\`, \`for (x in list) {...}\`, \`while (...) {...}\`, expression statements.
 - \`ok(v)\` and \`err(e)\` build a Result. \`match\` takes \`ok(name) => ...\` and \`err(name) => ...\` arms; an arm is an expression or a block.
 - \`if/else\` and \`match\` can be used as expressions; a block's last expression without \`;\` is its value.
 - Operators: \`+ - * / %\`, \`< > <= >=\`, \`== != === !==\`, \`&& || !\`. Literals: numbers, \`"strings"\`, \`true\`, \`false\`, \`null\`. Comments: \`//\`.
-- Functions can call each other in any order and can recurse. There are no loops, arrays, or objects.
+- Functions can call each other in any order and can recurse. There are no plain objects or arrays (use records and lists), no methods, no \`break\`.
 
 ${BOUNDARY}
 ## Builtins

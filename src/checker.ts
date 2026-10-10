@@ -1,19 +1,20 @@
 // This file is the rule-checker, the "teacher" that reads a program and marks mistakes.
 // It makes sure the program follows Tensium's rules: failures are returned as values
-// instead of thrown, every Result is opened with both an ok and an err case, and nothing
-// that might be empty (null) gets used before it is checked. It also guards the line between
-// client and server: both sides must agree on every record field, and secrets must stay on
-// the server. Each mistake becomes a diagnostic with the exact spot, what was expected, what
-// was found, and a suggested fix.
+// instead of thrown, every Result is opened with both an ok and an err case, every match on an
+// enum covers every member, nothing that might be empty (null) gets used before it is checked,
+// a newtype like Cents is never mixed up with a plain number, and only bindings marked 'mut'
+// can change. It also guards the line between client and server: both sides must agree on
+// every record field, and secrets must stay on the server. Each mistake becomes a diagnostic
+// with the exact spot, what was expected, what was found, and a suggested fix.
 
-import { Block, Expr, Fn, IfExpr, MatchExpr, Program, RecordExpr, Side, Stmt, TypeDecl, TypeNode } from './ast.ts';
+import { Block, EnumDecl, Expr, Fn, IfExpr, MatchExpr, NewtypeDecl, Program, RecordExpr, Side, Stmt, TypeDecl, TypeNode } from './ast.ts';
 import { Diagnostic, FixSpec, Loc, mkDiag } from './diagnostics.ts';
 import { PRELUDE } from './prelude.ts';
 import { T, Ty, assignable, containsSecret, isComplete, tyStr, unify } from './types.ts';
 
 class Var {
   used = false;
-  constructor(public name: string, public ty: Ty, public loc: Loc, public isLet: boolean, public orig?: Var) {}
+  constructor(public name: string, public ty: Ty, public loc: Loc, public isLet: boolean, public orig?: Var, public mut = false) {}
 }
 
 class Scope {
@@ -42,6 +43,8 @@ interface Sig { params: Ty[]; ret: Ty | null; side: Side; fn?: Fn }
 interface FnCtx { ret: Ty | null; retTys: Ty[] }
 interface DeclInfo { decl: TypeDecl; ty?: Ty; resolving?: boolean }
 type RecordTy = Extract<Ty, { k: 'record' }>;
+type EnumTy = Extract<Ty, { k: 'enum' }>;
+type NewtypeTy = Extract<Ty, { k: 'newtype' }>;
 
 export interface CheckResult {
   diagnostics: Diagnostic[];
@@ -49,7 +52,7 @@ export interface CheckResult {
   boundary: string[];
 }
 
-const BUILTIN_TYPES = ['number', 'string', 'boolean', 'void', 'null', 'any', 'undefined', 'Result', 'Secret'];
+const BUILTIN_TYPES = ['number', 'string', 'boolean', 'void', 'null', 'any', 'undefined', 'Result', 'List', 'Secret'];
 
 function lev(a: string, b: string): number {
   const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -117,11 +120,16 @@ function blockReturns(b: Block): boolean {
   return b.stmts.some(stmtReturns) || (!!b.tail && exprReturns(b.tail));
 }
 
+/** The TypeScript spelling of the plain type inside a newtype (only number, string and boolean are allowed there). */
+const innerTs = (t: Ty): string => (t.k === 'number' || t.k === 'string' || t.k === 'boolean' ? t.k : 'unknown');
+
 class Checker {
   diags: Diagnostic[] = [];
   fns = new Map<string, Sig>();
   fnNodes = new Map<Fn, Sig>();
   types = new Map<string, DeclInfo>();
+  enums = new Map<string, EnumTy>();
+  newtypes = new Map<string, NewtypeTy>();
   cur: FnCtx = { ret: null, retTys: [] };
   curSide: Side = 'shared';
   curFn: Fn | undefined;
@@ -140,11 +148,13 @@ class Checker {
     this.diags.push(mkDiag(code, message, loc, o));
   }
   zeroAt(l: Loc): Loc { return { ...l, endLine: l.startLine, endCol: l.startCol, eo: l.so }; }
+  typeNames(): string[] { return [...this.types.keys(), ...this.enums.keys(), ...this.newtypes.keys()]; }
 
   // ---- types
   resolveType(n: TypeNode): Ty {
     switch (n.kind) {
       case 'TypeResult': return T.result(this.resolveType(n.ok), this.resolveType(n.err));
+      case 'TypeList': return T.list(this.resolveType(n.elem));
       case 'TypeNullable': {
         if (n.viaUndefined) {
           this.err('TN3002', "'undefined' is not allowed; use 'null' for absent values.", n.nullLoc, {
@@ -174,20 +184,27 @@ class Checker {
           case 'Result':
             this.err('TN0011', "Result requires two type arguments: Result<T, E>.", n.loc, { expected: 'Result<T, E>', actual: 'Result' });
             return T.unknown;
+          case 'List':
+            this.err('TN0011', "List requires a type argument: List<T>.", n.loc, { expected: 'List<T>', actual: 'List' });
+            return T.unknown;
           case 'Secret':
             this.secretOutsideServer('Secret', n.loc);
             return T.secret;
           default: {
+            const en = this.enums.get(n.name);
+            if (en) return en;
+            const nt = this.newtypes.get(n.name);
+            if (nt) return nt;
             const d = this.types.get(n.name);
             if (d) {
               const t = this.resolveDecl(d);
               if (containsSecret(t)) this.secretOutsideServer(n.name, n.loc);
               return t;
             }
-            const known = ['number', 'string', 'boolean', 'void', 'Result', ...this.types.keys()];
+            const known = ['number', 'string', 'boolean', 'void', 'Result', 'List', ...this.typeNames()];
             const s = nearest(n.name, known);
             this.err('TN0004', `Cannot find type '${n.name}'.`, n.loc, {
-              expected: [...known.slice(0, 4), 'null', 'Result<T, E>', ...this.types.keys()].join(' | '), actual: n.name,
+              expected: [...known.slice(0, 4), 'null', 'Result<T, E>', 'List<T>', ...this.typeNames()].join(' | '), actual: n.name,
               fix: s ? { description: `Did you mean '${s}'?`, edit: { loc: n.loc, newText: s } } : { description: "Use a builtin type, or declare one: type Name = { field: type, ... }" },
             });
             return T.unknown;
@@ -228,25 +245,61 @@ class Checker {
     return d.ty;
   }
 
-  // ---- program
-  run(p: Program): CheckResult {
-    for (const d of p.types) {
-      if (BUILTIN_TYPES.includes(d.name) || this.types.has(d.name)) {
-        this.err('TN0007', BUILTIN_TYPES.includes(d.name) ? `'${d.name}' is a builtin type and cannot be redefined.` : `Duplicate type '${d.name}'.`, d.nameLoc, {
-          fix: { description: 'Rename the type' },
-        });
+  /** Records, enums and newtypes share one namespace; each name is declared once. */
+  declareName(name: string, nameLoc: Loc): boolean {
+    if (BUILTIN_TYPES.includes(name) || this.types.has(name) || this.enums.has(name) || this.newtypes.has(name)) {
+      this.err('TN0007', BUILTIN_TYPES.includes(name) ? `'${name}' is a builtin type and cannot be redefined.` : `Duplicate type '${name}'.`, nameLoc, {
+        fix: { description: 'Rename the type' },
+      });
+      return false;
+    }
+    return true;
+  }
+
+  declareEnum(d: EnumDecl): void {
+    if (!this.declareName(d.name, d.nameLoc)) return;
+    const members: string[] = [];
+    for (const m of d.members) {
+      if (members.includes(m.name)) {
+        this.err('TN0007', `Duplicate member '${m.name}' in enum '${d.name}'.`, m.loc, { fix: { description: 'Remove or rename the duplicate member' } });
         continue;
       }
+      members.push(m.name);
+    }
+    if (members.length === 0) this.err('TN0011', `Enum '${d.name}' has no members.`, d.nameLoc, { expected: 'at least one member', actual: 'none' });
+    this.enums.set(d.name, { k: 'enum', name: d.name, members });
+  }
+
+  declareNewtype(d: NewtypeDecl): void {
+    if (!this.declareName(d.name, d.nameLoc)) return;
+    const inner = this.resolveType(d.typeNode);
+    if (inner.k !== 'number' && inner.k !== 'string' && inner.k !== 'boolean' && inner.k !== 'unknown') {
+      this.err('TN0011', `A newtype wraps a plain number, string or boolean, not '${tyStr(inner)}'.`, d.typeNode.loc, {
+        expected: 'number, string or boolean', actual: tyStr(inner),
+        fix: { description: 'Use a record type (type Name = { ... }) for anything more than one plain value' },
+      });
+    }
+    this.newtypes.set(d.name, { k: 'newtype', name: d.name, inner });
+  }
+
+  // ---- program
+  run(p: Program): CheckResult {
+    this.curSide = 'server';
+    for (const d of p.enums) this.declareEnum(d);
+    for (const d of p.newtypes) this.declareNewtype(d);
+    for (const d of p.types) {
+      if (!this.declareName(d.name, d.nameLoc)) continue;
       this.types.set(d.name, { decl: d });
     }
     // A record type may hold a Secret; whether it is allowed is decided at each place the type is used.
-    this.curSide = 'server';
     for (const d of this.types.values()) this.resolveDecl(d);
     for (const fn of p.fns) {
       this.curSide = fn.side;
-      if (PRELUDE[fn.name] || fn.name === 'ok' || fn.name === 'err' || this.fns.has(fn.name)) {
-        this.err('TN0007', PRELUDE[fn.name] || fn.name === 'ok' || fn.name === 'err'
-          ? `'${fn.name}' is a builtin and cannot be redefined.` : `Duplicate function '${fn.name}'.`, fn.nameLoc, {
+      const taken = PRELUDE[fn.name] || fn.name === 'ok' || fn.name === 'err';
+      const isType = this.enums.has(fn.name) || this.newtypes.has(fn.name) || this.types.has(fn.name);
+      if (taken || isType || this.fns.has(fn.name)) {
+        this.err('TN0007', taken ? `'${fn.name}' is a builtin and cannot be redefined.`
+          : isType ? `'${fn.name}' is already the name of a type.` : `Duplicate function '${fn.name}'.`, fn.nameLoc, {
           fix: { description: 'Rename the function' },
         });
       }
@@ -263,7 +316,7 @@ class Checker {
       const ret = fn.retNode ? this.resolveType(fn.retNode) : null;
       const sig: Sig = { params, ret, side: fn.side, fn };
       this.fnNodes.set(fn, sig);
-      if (!this.fns.has(fn.name) && !PRELUDE[fn.name]) this.fns.set(fn.name, sig);
+      if (!this.fns.has(fn.name) && !taken && !isType) this.fns.set(fn.name, sig);
     }
     for (const fn of p.fns) this.checkFn(fn);
     this.checkBoundary();
@@ -388,16 +441,64 @@ class Checker {
         } else {
           ty = initTy;
           if (ty.k !== 'unknown' && (!isComplete(ty) || ty.k === 'null')) {
+            const hint = ty.k === 'list' ? `List<number>` : 'Result<number, string>';
             this.err('TN3001', `Variable '${s.name}' implicitly has type '${tyStr(ty)}' that cannot be fully inferred.`, s.nameLoc, {
               expected: 'type annotation', actual: tyStr(ty),
-              fix: { description: `Annotate the binding, e.g. 'let ${s.name}: Result<number, string> = ...'` },
+              fix: { description: `Annotate the binding, e.g. 'let ${s.mut ? 'mut ' : ''}${s.name}: ${hint} = ...'` },
             });
             ty = T.unknown;
           }
         }
         const prev = scope.vars.get(s.name);
         if (prev && !prev.orig) this.err('TN0007', `Duplicate binding '${s.name}' in the same scope.`, s.nameLoc, { fix: { description: 'Rename the binding' } });
-        scope.vars.set(s.name, new Var(s.name, ty, s.nameLoc, true));
+        scope.vars.set(s.name, new Var(s.name, ty, s.nameLoc, true, undefined, s.mut));
+        return;
+      }
+      case 'Assign': {
+        const t = this.checkExpr(s.expr, scope);
+        const v = scope.lookup(s.name);
+        if (!v) {
+          const near = nearest(s.name, scope.names());
+          this.err('TN0004', `Cannot find name '${s.name}'.`, s.nameLoc, {
+            actual: s.name,
+            fix: near ? { description: `Did you mean '${near}'?`, edit: { loc: s.nameLoc, newText: near } } : { description: `Declare it first: let mut ${s.name} = ...;` },
+          });
+          return;
+        }
+        const root = v.orig ?? v;
+        if (!root.mut) {
+          const declLoc = root.loc;
+          this.err('TN0012', `Cannot assign to '${s.name}': it was not declared with 'let mut'.`, s.nameLoc, {
+            expected: `a binding declared 'let mut ${s.name} = ...'`, actual: root.isLet ? `'${s.name}' declared with 'let'` : `parameter '${s.name}'`,
+            fix: root.isLet
+              ? { description: `Declare it as 'let mut ${s.name}'`, edit: { loc: this.zeroAt(declLoc), newText: 'mut ' } }
+              : { description: `Copy it into a mutable binding first: let mut ${s.name}2 = ${s.name};` },
+          });
+        }
+        this.reportAssign(t, root.ty, s.expr);
+        markUsed(v);
+        // the new value may be null again, so any narrowing of this name is gone
+        if (v.orig) scope.vars.set(s.name, root);
+        return;
+      }
+      case 'For': {
+        const it = this.checkExpr(s.iter, scope);
+        let elem: Ty = T.unknown;
+        if (it.k === 'list') elem = it.elem;
+        else if (it.k !== 'unknown') {
+          this.err('TN0002', `Can only loop over a List; '${this.txt(s.iter.loc)}' is ${tyStr(it)}.`, s.iter.loc, {
+            expected: 'List<T>', actual: tyStr(it),
+            fix: { description: it.k === 'number' ? 'Loop over range(0, n) to count' : 'Loop over a list value' },
+          });
+        }
+        if (scope.lookup(s.name)) this.err('TN0007', `Duplicate binding '${s.name}'.`, s.nameLoc, { fix: { description: 'Rename the loop variable' } });
+        this.checkBlock(s.body, scope, false, [], [new Var(s.name, elem, s.nameLoc, false)]);
+        return;
+      }
+      case 'While': {
+        const ct = this.checkExpr(s.cond, scope);
+        this.reportAssign(ct, T.boolean, s.cond);
+        this.checkBlock(s.body, scope, false, narrowings(s.cond).t);
         return;
       }
       case 'Return': {
@@ -458,6 +559,11 @@ class Checker {
         expected: 'a match with ok and err arms (or bind/return the Result)', actual: tyStr(t),
         fix: { description: 'Handle both the ok and err cases with match', edit: { loc: stmtLoc, newText } },
       });
+    } else if (e.kind === 'Call' && t.k === 'list' && (e.name === 'push' || e.name === 'concat')) {
+      this.err('TN1002', `'${e.name}' gives back a new list; the old one does not change, so this call does nothing.`, e.loc, {
+        expected: `let mut xs = ...; xs = ${e.name}(xs, ...);`, actual: `unused ${tyStr(t)}`,
+        fix: { description: `Keep the result: ${this.txt(e.args[0]?.loc ?? e.loc)} = ${this.txt(e.loc)};` },
+      });
     }
   }
 
@@ -495,14 +601,15 @@ class Checker {
 
   checkMatch(e: MatchExpr, scope: Scope, value: boolean): Ty {
     const st = this.checkExpr(e.scrut, scope);
+    if (st.k === 'enum') return this.checkEnumMatch(e, st, scope, value);
     let okTy: Ty = T.unknown, errTy: Ty = T.unknown;
     let exhaustive = true;
     if (st.k === 'result') { okTy = st.ok; errTy = st.err; }
     else if (st.k !== 'unknown') {
       exhaustive = false;
-      this.err('TN2004', 'match requires a Result value.', e.scrut.loc, {
-        expected: 'Result<T, E>', actual: tyStr(st),
-        fix: { description: 'Match only on values of type Result<T, E>; use if/else for other types' },
+      this.err('TN2004', 'match requires a Result or an enum value.', e.scrut.loc, {
+        expected: 'Result<T, E> or an enum', actual: tyStr(st),
+        fix: { description: 'Match only on a Result<T, E> or an enum value; use if/else for other types' },
       });
     }
     const seen: string[] = [];
@@ -524,23 +631,19 @@ class Checker {
         this.err('TN2002', `Duplicate '${arm.pat}' arm.`, arm.patLoc, { expected: 'each of ok/err once', actual: `second '${arm.pat}' arm`, fix: { description: 'Remove the duplicate arm' } });
       }
       if (eff !== '?') seen.push(eff);
-      const bind = new Var(arm.bind, eff === 'ok' ? okTy : eff === 'err' ? errTy : T.unknown, arm.bindLoc, false);
+      if (arm.bind === undefined) {
+        const name = eff === 'err' ? 'e' : 'v';
+        this.err('TN2003', `'${arm.pat}' needs a name for its value: ${arm.pat}(${name}).`, arm.patLoc, {
+          expected: `${arm.pat}(${name}) => ...`, actual: `${arm.pat} => ...`,
+          fix: { description: `Write ${arm.pat}(${name})`, edit: { loc: arm.patLoc, newText: `${arm.pat}(${name})` } },
+        });
+      }
+      const bind = new Var(arm.bind ?? '_', eff === 'ok' ? okTy : eff === 'err' ? errTy : T.unknown, arm.bindLoc ?? arm.patLoc, false);
       if (value) this.valueDepth++;
       const ty = this.checkBlock(arm.body, scope, value, [], [bind]);
       if (value) this.valueDepth--;
       armTys.push(ty);
-      if (value) {
-        if (acc === null) acc = ty;
-        else {
-          const u = unify(acc, ty);
-          if (u) acc = u;
-          else {
-            this.err('TN0002', `Type '${tyStr(ty)}' is not assignable to type '${tyStr(acc)}'.`, arm.body.tail?.loc ?? arm.body.loc, {
-              expected: tyStr(acc), actual: tyStr(ty), fix: { description: 'Make all match arms produce the same type' },
-            });
-          }
-        }
-      }
+      if (value) acc = this.joinArm(acc, ty, arm);
     }
     if (exhaustive) {
       for (const m of ['ok', 'err'] as const) {
@@ -556,6 +659,54 @@ class Checker {
       }
     }
     return value ? (acc ?? T.unknown) : T.void;
+  }
+
+  /** `match status { Draft => ..., Sent => ..., ... }`: every member once, no bindings. */
+  checkEnumMatch(e: MatchExpr, st: EnumTy, scope: Scope, value: boolean): Ty {
+    const seen: string[] = [];
+    let acc: Ty | null = null;
+    for (const arm of e.arms) {
+      if (!st.members.includes(arm.pat)) {
+        const guess = nearest(arm.pat, st.members);
+        this.err('TN2003', `'${arm.pat}' is not a member of enum '${st.name}'.`, arm.patLoc, {
+          expected: `one of: ${st.members.join(', ')}`, actual: `'${arm.pat}'`,
+          fix: guess ? { description: `Did you mean '${guess}'?`, edit: { loc: arm.patLoc, newText: guess } } : { description: `Use one of the members of ${st.name}` },
+        });
+      } else if (seen.includes(arm.pat)) {
+        this.err('TN2002', `Duplicate '${arm.pat}' arm.`, arm.patLoc, { expected: 'each member once', actual: `second '${arm.pat}' arm`, fix: { description: 'Remove the duplicate arm' } });
+      } else seen.push(arm.pat);
+      if (arm.bind !== undefined && arm.bindLoc) {
+        this.err('TN2003', `Enum members carry no value, so '${arm.pat}' takes no binding.`, arm.bindLoc, {
+          expected: `${arm.pat} => ...`, actual: `${arm.pat}(${arm.bind}) => ...`,
+          fix: { description: `Write '${arm.pat} =>'`, edit: { loc: { ...arm.patLoc, endLine: arm.bindLoc.endLine, endCol: arm.bindLoc.endCol + 1, eo: arm.bindLoc.eo + 1 }, newText: arm.pat } },
+        });
+      }
+      if (value) this.valueDepth++;
+      const ty = this.checkBlock(arm.body, scope, value);
+      if (value) this.valueDepth--;
+      if (value) acc = this.joinArm(acc, ty, arm);
+    }
+    const missing = st.members.filter((m) => !seen.includes(m));
+    if (missing.length) {
+      const ind = this.indent(e.closeLoc.startLine);
+      this.err('TN2001', `match is not exhaustive: missing ${missing.map((m) => `'${m}'`).join(', ')}.`, e.headLoc, {
+        expected: `arms: ${st.members.join(', ')}`, actual: `arms: ${seen.join(', ') || '(none)'}`,
+        fix: value
+          ? { description: `Add an arm for each of: ${missing.join(', ')}` }
+          : { description: `Add the missing arm${missing.length === 1 ? '' : 's'}`, edit: { loc: this.zeroAt(e.closeLoc), newText: missing.map((m) => `  ${m} => {},\n${ind}`).join('') } },
+      });
+    }
+    return value ? (acc ?? T.unknown) : T.void;
+  }
+
+  joinArm(acc: Ty | null, ty: Ty, arm: MatchExpr['arms'][number]): Ty {
+    if (acc === null) return ty;
+    const u = unify(acc, ty);
+    if (u) return u;
+    this.err('TN0002', `Type '${tyStr(ty)}' is not assignable to type '${tyStr(acc)}'.`, arm.body.tail?.loc ?? arm.body.loc, {
+      expected: tyStr(acc), actual: tyStr(ty), fix: { description: 'Make all match arms produce the same type' },
+    });
+    return acc;
   }
 
   armStub(missing: 'ok' | 'err', value: boolean, st: Ty, armTys: Ty[]): string | null {
@@ -598,6 +749,20 @@ class Checker {
           : pathOf(e) !== null
             ? { description: `Check for null first: if (${text} !== null) { ... } (or compare with === null and return early)` }
             : { description: `Give the value a name, then check it: let value = ${text}; if (value !== null) { ... }` },
+      });
+    } else if (actual.k === 'newtype' && assignable(actual.inner, want)) {
+      this.err('TN0002', `Type '${A}' is not assignable to type '${E}'; ${A} wraps a ${tyStr(actual.inner)}, and the two are kept apart on purpose.`, e.loc, {
+        expected: E, actual: A,
+        fix: { description: `Read the plain ${tyStr(actual.inner)} with .value`, edit: { loc: e.loc, newText: `${text}.value` } },
+      });
+    } else if (want.k === 'newtype' && actual.k !== 'newtype' && assignable(actual, want.inner)) {
+      this.err('TN0002', `Type '${A}' is not assignable to type '${E}'; a plain ${A} must be wrapped as ${want.name}(...).`, e.loc, {
+        expected: E, actual: A,
+        fix: { description: `Wrap it: ${want.name}(${text})`, edit: { loc: e.loc, newText: `${want.name}(${text})` } },
+      });
+    } else if (want.k === 'newtype' && actual.k === 'newtype') {
+      this.err('TN0002', `Type '${A}' is not assignable to type '${E}'; these are different newtypes and cannot be mixed up.`, e.loc, {
+        expected: E, actual: A, fix: { description: `Pass a ${want.name}, not a ${A}` },
       });
     } else if (expected.k === 'result' && actual.k !== 'result' && actual.k !== 'unknown' && assignable(actual, expected.ok)) {
       this.err('TN0002', `Type '${A}' is not assignable to type '${E}'; a success value must be wrapped in ok(...).`, e.loc, {
@@ -668,6 +833,14 @@ class Checker {
           this.err('TN0004', `'${e.name}' is a function and cannot be used as a value.`, e.loc, { fix: { description: `Call it: ${e.name}(...)` } });
           return T.unknown;
         }
+        const en = this.enums.get(e.name);
+        if (en) {
+          this.err('TN0004', `'${e.name}' is an enum; pick one of its members.`, e.loc, {
+            expected: en.members.map((m) => `${e.name}.${m}`).join(' | '), actual: e.name,
+            fix: { description: `Write ${e.name}.${en.members[0] ?? 'Member'}` },
+          });
+          return T.unknown;
+        }
         const s = nearest(e.name, scope.names());
         this.err('TN0004', `Cannot find name '${e.name}'.`, e.loc, {
           actual: e.name,
@@ -684,13 +857,64 @@ class Checker {
       case 'Binary': return this.checkBinary(e, scope);
       case 'Call': return this.checkCall(e, scope);
       case 'Field': return this.checkField(e, scope);
+      case 'List': return this.checkList(e, scope);
+      case 'EnumVal': return this.enums.get(e.enumName) ?? T.unknown;
+      case 'Unwrap': { const t = this.checkExpr(e.expr, scope); return t.k === 'newtype' ? t.inner : T.unknown; }
       case 'Record': return this.checkRecord(e, scope);
       case 'If': return this.checkIf(e, scope, true);
       case 'Match': return this.checkMatch(e, scope, true);
     }
   }
 
+  checkList(e: Extract<Expr, { kind: 'List' }>, scope: Scope): Ty {
+    let elem: Ty = T.unknown;
+    for (const item of e.items) {
+      const t = this.checkExpr(item, scope);
+      const u = unify(elem, t);
+      if (u) elem = u;
+      else {
+        this.err('TN0002', `Type '${tyStr(t)}' is not assignable to type '${tyStr(elem)}'; every item in a list has the same type.`, item.loc, {
+          expected: tyStr(elem), actual: tyStr(t), fix: { description: 'Make every item the same type' },
+        });
+      }
+    }
+    return T.list(elem);
+  }
+
   checkRecord(e: RecordExpr, scope: Scope): Ty {
+    if (e.spread) {
+      const base = this.checkExpr(e.spread, scope);
+      const rec = base.k === 'nullable' ? base.inner : base;
+      if (base.k === 'unknown') { for (const f of e.fields) this.checkExpr(f.value, scope); return T.unknown; }
+      if (rec.k !== 'record') {
+        this.err('TN0002', `Only a record can be copied with '...'; '${this.txt(e.spread.loc)}' is ${tyStr(base)}.`, e.spread.loc, { expected: 'a record value', actual: tyStr(base) });
+        for (const f of e.fields) this.checkExpr(f.value, scope);
+        return T.unknown;
+      }
+      if (base.k === 'nullable') {
+        this.err('TN3002', `'${this.txt(e.spread.loc)}' may be null, so it cannot be copied yet.`, e.spread.loc, {
+          expected: tyStr(rec), actual: tyStr(base), fix: { description: `Check for null first: if (${this.txt(e.spread.loc)} !== null) { ... }` },
+        });
+      }
+      const seen: string[] = [];
+      for (const f of e.fields) {
+        const t = this.checkExpr(f.value, scope);
+        if (seen.includes(f.name)) { this.err('TN0007', `Duplicate field '${f.name}' in record.`, f.nameLoc, { fix: { description: 'Remove the duplicate field' } }); continue; }
+        seen.push(f.name);
+        const want = rec.fields.find(([n]) => n === f.name);
+        if (!want) {
+          const names = rec.fields.map(([n]) => n);
+          const guess = nearestField(f.name, names);
+          this.err('TN5005', `'${f.name}' is not a field of type '${tyStr(rec)}'.`, f.nameLoc, {
+            expected: `one of: ${names.join(', ')}`, actual: f.name,
+            fix: guess ? { description: `Did you mean '${guess}'?`, edit: { loc: f.nameLoc, newText: guess } } : { description: `Remove '${f.name}', or add it to type ${tyStr(rec)}` },
+          });
+          continue;
+        }
+        this.reportAssign(t, want[1], f.value);
+      }
+      return rec;
+    }
     const fields: [string, Ty][] = [];
     for (const f of e.fields) {
       const t = this.checkExpr(f.value, scope);
@@ -704,17 +928,44 @@ class Checker {
   }
 
   checkField(e: Extract<Expr, { kind: 'Field' }>, scope: Scope): Ty {
+    // `Status.Draft`: an enum's name followed by one of its members
+    if (e.obj.kind === 'Ident' && !scope.lookup(e.obj.name) && this.enums.has(e.obj.name)) {
+      const en = this.enums.get(e.obj.name)!;
+      if (!en.members.includes(e.name)) {
+        const guess = nearest(e.name, en.members);
+        this.err('TN2003', `'${e.name}' is not a member of enum '${en.name}'.`, e.nameLoc, {
+          expected: `one of: ${en.members.join(', ')}`, actual: e.name,
+          fix: guess ? { description: `Did you mean '${guess}'?`, edit: { loc: e.nameLoc, newText: guess } } : { description: `Use one of the members of ${en.name}` },
+        });
+        return T.unknown;
+      }
+      Object.assign(e, { kind: 'EnumVal', enumName: en.name, member: e.name });
+      return en;
+    }
     const ot = this.checkExpr(e.obj, scope);
     if (ot.k === 'unknown') return T.unknown;
     const objText = this.txt(e.obj.loc);
     const rec = ot.k === 'nullable' ? ot.inner : ot;
+    if (rec.k === 'newtype') {
+      if (e.name === 'value' && ot.k !== 'nullable') {
+        Object.assign(e, { kind: 'Unwrap', expr: e.obj, inner: innerTs(rec.inner) });
+        return rec.inner;
+      }
+      this.err(ot.k === 'nullable' ? 'TN3002' : 'TN0002', ot.k === 'nullable'
+        ? `'${objText}' may be null, so its value cannot be read yet.`
+        : `'${rec.name}' wraps a ${tyStr(rec.inner)}; read it with '.value'.`, e.nameLoc, {
+        expected: `${objText}.value`, actual: `${objText}.${e.name}`,
+        fix: ot.k === 'nullable' ? { description: `Check for null first: if (${objText} !== null) { ... }` } : { description: `Use .value`, edit: { loc: e.nameLoc, newText: 'value' } },
+      });
+      return T.unknown;
+    }
     if (rec.k !== 'record') {
-      const useLen = ot.k === 'string' && e.name === 'length';
+      const useLen = (ot.k === 'string' || ot.k === 'list') && e.name === 'length';
       this.err('TN0002', `Type '${tyStr(ot)}' has no fields.`, e.loc, {
         expected: 'a record value', actual: tyStr(ot),
         fix: useLen
-          ? { description: 'Use the builtin len(s) for the length of a string', edit: { loc: e.loc, newText: `len(${objText})` } }
-          : { description: 'Only record types (type Name = { ... }) have fields; use builtin functions for strings and numbers' },
+          ? { description: `Use the builtin len(x) for the length of a ${ot.k}`, edit: { loc: e.loc, newText: `len(${objText})` } }
+          : { description: 'Only record types (type Name = { ... }) have fields; use builtin functions for strings, numbers and lists' },
       });
       return T.unknown;
     }
@@ -783,6 +1034,7 @@ class Checker {
       if (lt.k === 'null' || rt.k === 'null' || assignable(lt, rt) || assignable(rt, lt)) return T.boolean;
       this.err('TN0002', `This comparison is always false: types '${tyStr(lt)}' and '${tyStr(rt)}' have no overlap.`, e.loc, {
         expected: tyStr(lt), actual: tyStr(rt),
+        fix: lt.k === 'newtype' && rt.k === lt.inner.k ? { description: `Compare the plain values: ${this.txt(e.left.loc)}.value` } : undefined,
       });
       return T.boolean;
     }
@@ -804,10 +1056,40 @@ class Checker {
       const t = this.checkExpr(e.args[0], scope);
       return e.name === 'ok' ? T.result(t, T.unknown) : T.result(T.unknown, t);
     }
+    // `Cents(500)`: wrapping a plain value in a newtype
+    const nt = this.newtypes.get(e.name);
+    if (nt) {
+      const argTys = e.args.map((a) => this.checkExpr(a, scope));
+      if (e.args.length !== 1) {
+        this.err('TN0005', `Expected 1 argument, but got ${e.args.length}.`, e.loc, { expected: `${nt.name}(${tyStr(nt.inner)})`, actual: `${e.args.length} arguments` });
+        return nt;
+      }
+      if (argTys[0].k === 'newtype' && argTys[0].name === nt.name) {
+        this.err('TN0002', `'${this.txt(e.args[0].loc)}' is already a ${nt.name}.`, e.args[0].loc, {
+          expected: tyStr(nt.inner), actual: nt.name, fix: { description: 'Use the value as it is', edit: { loc: e.loc, newText: this.txt(e.args[0].loc) } },
+        });
+        return nt;
+      }
+      this.reportAssign(argTys[0], nt.inner, e.args[0]);
+      return nt;
+    }
     const own = this.fns.get(e.name);
     const pre = own ? undefined : PRELUDE[e.name];
-    const sig: Sig | undefined = own ?? (pre && { params: pre.params, ret: pre.ret, side: 'shared' });
     const argTys = e.args.map((a) => this.checkExpr(a, scope));
+    let sig: Sig | undefined = own;
+    if (pre) {
+      if (pre.generic) {
+        const g = pre.generic(argTys);
+        if (!g) {
+          this.err('TN0002', `'${e.name}' works on lists: ${pre.sig ?? e.name}.`, e.args[0]?.loc ?? e.loc, {
+            expected: pre.sig ?? `${e.name}(List<T>, ...)`, actual: `${e.name}(${argTys.map(tyStr).join(', ')})`,
+            fix: { description: `Pass a List as the first argument` },
+          });
+          return pre.ret.k === 'list' ? T.list(T.unknown) : pre.ret.k === 'nullable' ? T.unknown : pre.ret;
+        }
+        sig = { params: g.params, ret: g.ret, side: 'shared' };
+      } else sig = { params: pre.params, ret: pre.ret, side: 'shared' };
+    }
     if (own) this.checkSides(e, own);
     if (pre?.side === 'server' && this.curSide !== 'server') {
       const shared = this.curSide === 'shared';
@@ -819,7 +1101,7 @@ class Checker {
       });
     }
     if (!sig) {
-      const s = nearest(e.name, [...this.fns.keys(), ...Object.keys(PRELUDE), 'ok', 'err']);
+      const s = nearest(e.name, [...this.fns.keys(), ...Object.keys(PRELUDE), 'ok', 'err', ...this.newtypes.keys()]);
       this.err('TN0004', `Cannot find name '${e.name}'.`, e.nameLoc, {
         actual: e.name,
         fix: s ? { description: `Did you mean '${s}'?`, edit: { loc: e.nameLoc, newText: s } } : { description: 'Define the function, or use one of the builtins' },

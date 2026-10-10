@@ -36,12 +36,13 @@ Each diagnostic: `{ code, severity, message, span: {file, startLine, startCol, e
 | TN1001 / TN1004 | `throw` / `try-catch` — errors are values |
 | TN1002 | a `Result` is ignored (bare call statement, or a `let`-bound Result never matched) |
 | TN1003 | a `Result` is used where its `T` is expected (`parseInt(s) + 1`) |
-| TN2001–2004 | `match` not exhaustive / duplicate arm / unknown pattern / scrutinee is not a Result |
+| TN2001–2004 | `match` not exhaustive (a Result's ok/err, or every member of an enum) / duplicate arm / unknown pattern / scrutinee is not a Result or enum |
 | TN3001 | implicit or explicit `any` (missing param/return annotation, un-inferable `let`) |
 | TN3002 | `null`/`undefined` not handled (`T \| null` used as `T` without a check; `undefined`) |
 | TN4001 / TN4002 | **file header rule**: every `.tn` file must start with a `//` comment explaining, in plain words a 5th grader could follow, what the file does (missing / too short or still has `TODO`) |
 | TN5001–5006 | **client/server boundary** (see below): secrets outside server code, secrets crossing the wire, wrong-side calls, unknown or missing record fields, boundary calls that don't return `Result<T, string>` |
-| TN0001–0011 | syntax, type mismatch, non-canonical syntax, undefined name, arity, missing return, duplicates, … |
+| TN0012 | assignment to a binding that is not `let mut`, or to a record field (records are copied with `{ ...r, field: v }`) |
+| TN0001–0011 | syntax, type mismatch (including a newtype used as its plain value, and vice versa), non-canonical syntax, undefined name, arity, missing return, duplicates, … |
 
 ### House rule: every file starts with a plain-words note
 
@@ -49,6 +50,8 @@ In the language: a `.tn` file with no top comment doesn't compile (TN4001), and 
 
 Null narrowing supports `if (x !== null)`, `if (x === null) { return …; }` (rest of block), `&&`/`||`, and else-branches, on plain names and on field paths such as `c.email`.
 The parser recovers from errors, so one check reports everything it can find.
+
+The language also has `List<T>` with `for (x in xs)` / `while` loops and `let mut` bindings, `enum Status { Draft, Sent }` with exhaustive `match`, `newtype Cents = number;` (a `Cents` is never a `number`; `Cents(n)` wraps, `.value` unwraps), and record copies `{ ...r, field: v }`. Lists and records never change in place: `push` and `concat` return new lists. The generated TypeScript keeps enums as string unions and newtypes as branded primitives, so JSON on the wire is the same as a hand-written app's.
 
 ## The client/server boundary
 

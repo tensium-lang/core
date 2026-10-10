@@ -2,9 +2,11 @@
 // TypeScript, a language that computers already know how to run. A plain program becomes
 // one file. A program with a server part and a client part becomes two files: one for the
 // server (which keeps the secrets) and one for the client (which never gets them), plus the
-// small pieces that let the two talk to each other over the network.
+// small pieces that let the two talk to each other over the network. Lists become arrays,
+// enums become fixed strings, and a newtype like Cents becomes a plain number that TypeScript
+// still keeps apart from other numbers, so nothing changes shape on the wire.
 
-import { Block, Expr, Fn, IfExpr, MatchExpr, Program, Stmt, TypeDecl, TypeNode } from './ast.ts';
+import { Block, EnumDecl, Expr, Fn, IfExpr, MatchExpr, NewtypeDecl, Program, Stmt, TypeDecl, TypeNode } from './ast.ts';
 import { PRELUDE } from './prelude.ts';
 
 type Mode = 'single' | 'server' | 'client';
@@ -40,13 +42,15 @@ ${builtins('server')}
 
 const WIRE_HELPERS = `// A description of each kind of value that may travel between client and server,
 // so both ends can check what arrives instead of trusting it.
-type __Desc = 'number' | 'string' | 'boolean' | 'void' | { nullable: __Desc } | { result: [__Desc, __Desc] } | { record: { [field: string]: __Desc } };
+type __Desc = 'number' | 'string' | 'boolean' | 'void' | { nullable: __Desc } | { list: __Desc } | { enum: string[] } | { result: [__Desc, __Desc] } | { record: { [field: string]: __Desc } };
 function __valid(v: unknown, d: __Desc): boolean {
   if (d === 'number') return typeof v === 'number' && Number.isFinite(v);
   if (d === 'string') return typeof v === 'string';
   if (d === 'boolean') return typeof v === 'boolean';
   if (d === 'void') return v === undefined || v === null;
   if ('nullable' in d) return v === null || __valid(v, d.nullable);
+  if ('list' in d) return Array.isArray(v) && v.every((x) => __valid(x, d.list));
+  if ('enum' in d) return typeof v === 'string' && d.enum.includes(v);
   if (typeof v !== 'object' || v === null) return false;
   const o = v as { [key: string]: unknown };
   if ('result' in d) return o.ok === true ? __valid(o.value, d.result[0]) : o.ok === false && __valid(o.error, d.result[1]);
@@ -116,6 +120,7 @@ function ty(n: TypeNode): string {
   switch (n.kind) {
     case 'TypeName': return n.name;
     case 'TypeResult': return `Result<${ty(n.ok)}, ${ty(n.err)}>`;
+    case 'TypeList': return `Array<${ty(n.elem)}>`;
     case 'TypeNullable': return `${ty(n.inner)} | null`;
   }
 }
@@ -127,16 +132,21 @@ class Emitter {
   private isAsync = false;
   private fnsByName: Map<string, Fn>;
   private decls: Map<string, TypeDecl>;
+  private enums: Map<string, EnumDecl>;
+  private newtypes: Map<string, NewtypeDecl>;
 
   constructor(private p: Program, private mode: Mode) {
     this.fnsByName = new Map(p.fns.map((f) => [f.name, f]));
     this.decls = new Map(p.types.map((d) => [d.name, d]));
+    this.enums = new Map(p.enums.map((d) => [d.name, d]));
+    this.newtypes = new Map(p.newtypes.map((d) => [d.name, d]));
   }
 
   // ---- types
   private nodeHasSecret(n: TypeNode, seen = new Set<string>()): boolean {
     switch (n.kind) {
       case 'TypeResult': return this.nodeHasSecret(n.ok, seen) || this.nodeHasSecret(n.err, seen);
+      case 'TypeList': return this.nodeHasSecret(n.elem, seen);
       case 'TypeNullable': return this.nodeHasSecret(n.inner, seen);
       case 'TypeName': {
         if (n.name === 'Secret') return true;
@@ -154,14 +164,26 @@ class Emitter {
   }
 
   typeDecls(): string {
-    return this.visibleTypes().map((d) => `export type ${d.name} = { ${d.fields.map((f) => `${f.name}: ${ty(f.typeNode)}`).join('; ')} };`).join('\n');
+    const enums = this.p.enums.map((d) => `export type ${d.name} = ${d.members.map((m) => JSON.stringify(m.name)).join(' | ')};`);
+    // a newtype is the plain value with a type-level tag: the same JSON as the value it wraps
+    const newtypes = this.p.newtypes.map((d) => `export type ${d.name} = ${ty(d.typeNode)} & { readonly __tn_${d.name}: true };`);
+    const records = this.visibleTypes().map((d) => `export type ${d.name} = { ${d.fields.map((f) => `${f.name}: ${ty(f.typeNode)}`).join('; ')} };`);
+    return [...enums, ...newtypes, ...records].join('\n');
   }
 
   desc(n: TypeNode): string {
     switch (n.kind) {
       case 'TypeResult': return `{ result: [${this.desc(n.ok)}, ${this.desc(n.err)}] }`;
+      case 'TypeList': return `{ list: ${this.desc(n.elem)} }`;
       case 'TypeNullable': return `{ nullable: ${this.desc(n.inner)} }`;
-      case 'TypeName': return this.decls.has(n.name) ? `__d_${n.name}` : `'${n.name}'`;
+      case 'TypeName': {
+        if (this.decls.has(n.name)) return `__d_${n.name}`;
+        const en = this.enums.get(n.name);
+        if (en) return `{ enum: [${en.members.map((m) => JSON.stringify(m.name)).join(', ')}] }`;
+        const nt = this.newtypes.get(n.name);
+        if (nt) return this.desc(nt.typeNode);
+        return `'${n.name}'`;
+      }
     }
   }
 
@@ -169,7 +191,7 @@ class Emitter {
   descDecls(): string {
     const out: string[] = [];
     const done = new Set<string>();
-    const names = (n: TypeNode): string[] => n.kind === 'TypeName' ? [n.name] : n.kind === 'TypeNullable' ? names(n.inner) : [...names(n.ok), ...names(n.err)];
+    const names = (n: TypeNode): string[] => n.kind === 'TypeName' ? [n.name] : n.kind === 'TypeNullable' ? names(n.inner) : n.kind === 'TypeList' ? names(n.elem) : [...names(n.ok), ...names(n.err)];
     const visit = (d: TypeDecl) => {
       if (done.has(d.name) || d.fields.some((f) => this.nodeHasSecret(f.typeNode))) return;
       done.add(d.name);
@@ -219,7 +241,10 @@ class Emitter {
 
   stmt(s: Stmt, ind: string): string {
     switch (s.kind) {
-      case 'Let': return `${ind}const ${s.name}${s.typeNode ? `: ${ty(s.typeNode)}` : ''} = ${this.expr(s.init, ind)};`;
+      case 'Let': return `${ind}${s.mut ? 'let' : 'const'} ${s.name}${s.typeNode ? `: ${ty(s.typeNode)}` : ''} = ${this.expr(s.init, ind)};`;
+      case 'Assign': return `${ind}${s.name} = ${this.expr(s.expr, ind)};`;
+      case 'For': return `${ind}for (const ${s.name} of ${this.expr(s.iter, ind)}) {\n${this.stmtBlock(s.body, ind + '  ')}\n${ind}}`;
+      case 'While': return `${ind}while (${this.expr(s.cond, ind)}) {\n${this.stmtBlock(s.body, ind + '  ')}\n${ind}}`;
       case 'Return': return `${ind}return${s.expr ? ' ' + this.expr(s.expr, ind) : ''};`;
       case 'ExprStmt': return this.exprStmt(s.expr, ind);
       default: throw new Error('cannot emit code that failed checking');
@@ -242,8 +267,15 @@ class Emitter {
     return out;
   }
 
+  private isResultMatch(e: MatchExpr): boolean { return e.arms.some((a) => a.pat === 'ok' || a.pat === 'err'); }
+
   matchStmt(e: MatchExpr, ind: string): string {
     const m = this.fresh();
+    if (!this.isResultMatch(e)) {
+      // an enum: one branch per member; the checker made sure every member has exactly one arm
+      const branches = e.arms.map((a, i) => `${i === 0 ? '' : ' else '}${i === e.arms.length - 1 ? '' : `if (${m} === ${JSON.stringify(a.pat)}) `}{\n${this.stmtBlock(a.body, ind + '    ')}\n${ind}  }`).join('');
+      return `${ind}{\n${ind}  const ${m} = ${this.expr(e.scrut, ind)};\n${ind}  ${branches}\n${ind}}`;
+    }
     const arm = (pat: string) => e.arms.find((a) => a.pat === pat)!;
     const ok = arm('ok'), er = arm('err');
     return `${ind}{\n${ind}  const ${m} = ${this.expr(e.scrut, ind)};\n` +
@@ -261,6 +293,7 @@ class Emitter {
     const args = e.args.map((a) => this.expr(a, ind)).join(', ');
     if (e.name === 'ok') return `__ok(${args})`;
     if (e.name === 'err') return `__err(${args})`;
+    if (this.newtypes.has(e.name)) return `(${args} as ${e.name})`;
     const target = this.fnsByName.get(e.name);
     if (!target) return `${PRELUDE[e.name]?.side === 'server' ? '__srv' : '__tn'}.${e.name}(${args})`;
     if (target.side === 'shared' || this.mode === 'single') return `${e.name}(${args})`;
@@ -285,7 +318,13 @@ class Emitter {
       }
       case 'Call': return this.call(e, ind);
       case 'Field': return `${this.expr(e.obj, ind)}.${e.name}`;
-      case 'Record': return `({ ${e.fields.map((f) => `${f.name}: ${this.expr(f.value, ind)}`).join(', ')} })`;
+      case 'List': return `[${e.items.map((x) => this.expr(x, ind)).join(', ')}]`;
+      case 'EnumVal': return JSON.stringify(e.member);
+      case 'Unwrap': return `(${this.expr(e.expr, ind)} as ${e.inner})`;
+      case 'Record': {
+        const fields = e.fields.map((f) => `${f.name}: ${this.expr(f.value, ind)}`);
+        return `({ ${[...(e.spread ? [`...${this.expr(e.spread, ind)}`] : []), ...fields].join(', ')} })`;
+      }
       case 'If': {
         const els = e.else!;
         const elseCode = els.kind === 'If' ? this.expr(els, ind) : this.valueBlock(els, ind);
@@ -293,6 +332,10 @@ class Emitter {
       }
       case 'Match': {
         const m = this.fresh();
+        if (!this.isResultMatch(e)) {
+          const branches = e.arms.map((a, i) => `${ind}  ${i === e.arms.length - 1 ? '' : `if (${m} === ${JSON.stringify(a.pat)}) `}{ return ${this.valueBlock(a.body, ind + '  ')}; }\n`).join('');
+          return this.iife(`\n${ind}  const ${m} = ${this.expr(e.scrut, ind)};\n${branches}${ind}`);
+        }
         const ok = e.arms.find((a) => a.pat === 'ok')!, er = e.arms.find((a) => a.pat === 'err')!;
         return this.iife(`\n${ind}  const ${m} = ${this.expr(e.scrut, ind)};\n` +
           `${ind}  if (${m}.ok) { const ${ok.bind} = ${m}.value; return ${this.valueBlock(ok.body, ind + '  ')}; }\n` +
