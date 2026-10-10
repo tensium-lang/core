@@ -2,7 +2,7 @@
 
 # Experiment 5: ten conventions in a doc, three compilers that enforce different subsets
 
-Written before any agent ran. The commit that adds this file freezes the app in all three languages, the conventions, the ten tasks, their hidden tests, the reference solutions, the tempting-wrong versions, the harness and the Tensium compiler.
+Written before any agent ran. The commit that adds this file (and the one after it, which only adds a plain-words note to CONTRIBUTING.md and a test exemption) freezes the app in all three languages, the conventions, the ten tasks, their hidden tests, the reference solutions, the tempting-wrong versions, the harness and the Tensium compiler.
 
 ## Why
 
