@@ -6,5 +6,16 @@
   "author": "Jay McCauley",
   "license": "MIT",
   "homepage": "https://tensium.dev",
-  "private": false
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "tn": "tsx src/cli.ts",
+    "test": "tsx --test test/*.test.ts",
+    "harness": "tsx harness/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
 }
