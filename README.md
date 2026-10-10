@@ -156,7 +156,9 @@ npx tsx harness/conventions.ts init --run c1 --model opus --trials 2 [--arms ts,
 npx tsx harness/conventions.ts score c1
 ```
 
-App, conventions and tasks: `harness/conventions/`. Pre-registration with the enforcement table, predictions and reading rules: `harness/conventions/PREREGISTRATION.md`.
+App, conventions and tasks: `harness/conventions/`. Pre-registration with the enforcement table, predictions and reading rules: `harness/conventions/PREREGISTRATION.md`. After scoring, `npx tsx harness/conventions-scan.ts c1` counts, per convention, what was shipped, stopped by the checker, or never made (reading the attempt logs and the final source).
+
+Every Rust work directory gets its own build folder, cloned copy-on-write from a seed of compiled dependencies: sharing one folder lets cargo hand one directory another directory's program without compiling it (found the hard way; see RESULTS.md).
 
 ## Experiment 1: feedback format
 

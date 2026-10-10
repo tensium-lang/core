@@ -203,3 +203,66 @@ Mine (Claude's), written before the run. Jay had given none.
 The bare-value mistake across everything run so far: plain TypeScript shipped it in 14 of 36 runs; TypeScript with the comment or the typed table, 0 of 24; Tensium wrote it first in 17 of 18 runs and shipped it in 0.
 
 **Limits:** 12 runs per arm, one model, one small app, three tasks that were picked because TypeScript failed them. The arm's name is visible in the work directory's path (`...__ts-shared-comment__t1`), so the runs were not blind to which arm they were in; I do not think that name tells an agent what to write. The scope limit from Experiment 4 holds: this is about one bug shape and says nothing about correctness overall.
+
+## Experiment 5: ten conventions in a doc, three compilers that enforce different subsets
+
+**Outcome, stated first: null.** With the team's ten conventions written once in `CONTRIBUTING.md` and Claude Opus 5.5 doing the work, no arm shipped a single convention violation: TypeScript 0 of 20, Rust 0 of 20, Tensium 0 of 20. By the rule written before the run (`harness/conventions/PREREGISTRATION.md`, rule 2), that means Opus follows a ten-rule document on an app this size, neither compiler was needed, and the experiment gives the thesis nothing.
+
+Frozen before any agent ran: commits `0011c6a`, `7710405` and `773a5b7`. Two things changed afterwards, both under the pre-registered rule for broken tooling (fix it, say so, re-run every arm on what it touched, report both results):
+
+1. **A harness bug invalidated the Rust arm of the first run.** All Rust submissions shared one cargo build folder. Cargo gives a crate of the same name at two paths the same fingerprint, so a submission could be handed another work directory's program, and an "OK" it had not earned, without its code ever being compiled. Five Rust runs scored "broken" with programs that lacked the routes their own source contained. Fix: every work directory gets its own build folder, cloned copy-on-write from a seed of compiled dependencies (commit `b3e285e`; the probe and the re-verified traps table are in that commit's test run). The Rust arm was re-run as `c2`. For the record, the first run's 20 Rust snapshots rebuilt from their own source all compile and all pass: the agents' code had been fine; only the tool was wrong.
+2. **The late-fee ticket was ambiguous.** "1.5 % of the balance for each full 30-day period" can be read as one rounding of 1.5 % × periods (what my hidden test expected) or as 1.5 % rounded once and then multiplied; on invoice 15 these differ by two cents ($3.16 against $3.18). Three runs took the second reading, every one of them through `percentOf`, so the money convention was kept. Two agents said so unprompted in their final reports. The ticket now states the rounding; task 07 was re-run in the TypeScript and Tensium arms as `c3` (the Rust re-run already had the clarified ticket).
+
+Setup: invoicing app (820 lines of TypeScript in 21 files; the same in Tensium, 720 lines in one file, and Rust, three crates) × 10 tasks, one per convention × 3 arms × 2 trials; Opus 5.5; at most 6 submissions. Identical tickets and the identical conventions file in every arm; the brief says to read it.
+
+### Headline: clean but broken
+
+| arm | runs | checker-clean | correct | **clean but broken** | clean on 1st submit | mean submissions |
+|---|---|---|---|---|---|---|
+| TypeScript (`tsc --strict` + eslint) | 20 | 20 | 20 | **0** | 18 | 1.1 |
+| Rust (`cargo` + clippy, `-D warnings`) | 20 | 20 | 20 | **0** | 20 | 1.0 |
+| Tensium | 20 | 20 | 20 | **0** | 20 | 1.0 |
+
+Rust is run `c2`; TypeScript and Tensium are run `c1` with task 07 taken from `c3`. As first run, before the ticket was clarified, TypeScript was 19 of 20 and Tensium 18 of 20, the three misses all being the other reading of the late fee. Nothing else failed in 124 scored runs.
+
+### Per convention
+
+Shipped / stopped by the checker / clean, out of 2 runs on each convention's task (same across arms, so one column):
+
+| # | convention | every arm | note |
+|---|---|---|---|
+| 1 | client-callable functions return a Result | 0 / 0 / 2 | the Experiment 2–4 bug: not made once by Opus |
+| 2 | errors are values, never thrown | 0 / 0 / 2 | |
+| 3 | a Result is never ignored | 0 / 0 / 2 | |
+| 4 | the secret stays on the server | 0 / 0 / 2 | no leak in any client source |
+| 5 | nullable values are checked | 0 / 0 / 2 | no `!`, `as` or `unwrap` on the phone field |
+| 6 | ids are distinct types | 0 / 0 / 2 | no swapped arguments |
+| 7 | money is integer cents via `percentOf` | 0 / 0 / 2 | every run used `percentOf`; the 3 first-run misses were rounding order, not float money |
+| 8 | status changes go through `transition` | 0 / 0 / 2 | no run set a status by hand (source scan) |
+| 9 | the server recomputes totals (control) | 0 / 0 / 2 | |
+| 10 | every file starts with a note | 0 / 0 / 2 | 37 new files were created across the TypeScript and Rust runs; all 37 start with one |
+
+**No checker ever fired on a convention.** The only rejected submissions in 124 runs were two eslint `no-unused-vars` errors (both TypeScript runs of task 02 left the `method` parameter unused, because the app stores nothing) and one Rust `E0432` (an import path typo, first run). None is a convention; all were fixed on the next submission.
+
+### Predictions against outcome
+
+| arm | predicted clean but broken | got | predicted 1st-try clean | got |
+|---|---|---|---|---|
+| TypeScript | 2 (0 to 5) | 0 | 17 | 18 |
+| Rust | 1 (0 to 2) | 0 | 11 | 20 |
+| Tensium | 1 (0 to 3) | 0 | 9 | 20 |
+
+The headline was inside my ranges. What I got wrong was the cost: I expected Rust's borrow checker and Tensium's unfamiliarity to cost submissions, and neither did. Opus wrote Rust that compiled first time 20 of 20, and Tensium, a language it had only a five-page sheet for, 20 of 20. In Experiments 2 and 4, Haiku paid about two submissions per Tensium run; Opus paid none.
+
+### What this does and does not show
+
+- **The pre-registered null.** Rule 2 applies: every arm shipped 0 or 1. A ten-rule document that the agent has to open was enough, for this model on this app, and the compilers' enforcement was never exercised. The thesis gets no support from this experiment.
+- **Experiment 4b's open question is answered, narrowly.** 4b showed one convention stated on the edited line is enough. Here the conventions were ten, in a separate file, with the edit two or three files away from the helper that embodies each one, and it was still enough. The distance I expected to defeat a comment did not, at this distance.
+- **The only failures were a specification problem, in every arm alike.** Three runs read an ambiguous ticket the other way. No compiler can help with that, and the three arms were equally exposed.
+- **Rust at parity, Tensium at parity, both at zero cost.** Nothing here separates Tensium from Rust, or either from TypeScript with a conventions file, and Tensium's earlier price (extra submissions) disappears with a stronger model, along with its earlier benefit.
+- **A design limit that weakens the test:** the tickets for 02, 03 and 08 tell the agent that the helper it needs already exists ("the server already has the rules..."). That lowers the chance of a violation in every arm, and I wrote them that way to keep the tickets honest about the app. Tickets that leave the helper for the agent to discover would be a harder test.
+- **Limits:** one model, and a strong one, by Jay's decision; one app of 820 lines; ten conventions each with one task and two trials per cell; a stateless app, which rules out the class of bugs where a change is applied but not persisted. Nothing here says what Haiku would do on the same setup; Experiment 4 says Haiku does violate convention 1 without a comment, and that comparison, same app and conventions, is the obvious next run.
+
+### Where the notebook stands after five experiments
+
+Across every agent run so far, the only convention violations ever shipped were Haiku's bare-value returns (Experiments 2 and 4), and one line of English removes them (4b). With Opus and a conventions file, none of the ten conventions, including that one, was violated in any language (5). No experiment in this notebook shows Tensium producing more correct code than TypeScript set up the way a team would set it up, and Experiment 5 shows Rust at parity too. The remaining case for a compiler rule over a written convention is a weaker model or a larger codebase than any tested here.
