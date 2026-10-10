@@ -1,0 +1,9 @@
+# The types and helpers that both halves of the invoicing app use.
+
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }

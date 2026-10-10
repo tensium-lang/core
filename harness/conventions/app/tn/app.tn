@@ -1,0 +1,702 @@
+// A small invoicing app with two halves in one file. The server half knows the customers,
+// products, invoices, payments and credit notes, works out what each invoice adds up to and when
+// it is due, writes reminder messages, and signs receipts with a secret. The client half asks the
+// server for all of that and turns it into the lines of text a person sees on each screen.
+// Both halves share the same record types, so they can never disagree about what an invoice is.
+
+// ---- the kinds of value the app talks about
+
+newtype Cents = number;
+newtype CustomerId = number;
+newtype ProductId = number;
+newtype InvoiceId = number;
+
+enum Status { Draft, Sent, Paid, Void }
+
+type Customer = { id: CustomerId, name: string, email: string, phone: string | null, termsDays: number, region: string }
+type Product = { id: ProductId, name: string, unitCents: Cents, taxable: boolean }
+type LineItem = { productId: ProductId, quantity: number, unitCents: Cents }
+type Invoice = { id: InvoiceId, customerId: CustomerId, issuedOn: string, status: Status, lines: List<LineItem>, discountPercent: number, notes: string | null, sentOn: string | null, paidOn: string | null }
+type Payment = { invoiceId: InvoiceId, amountCents: Cents, receivedOn: string, method: string }
+type CreditNote = { id: number, invoiceId: InvoiceId, amountCents: Cents, reason: string }
+type Totals = { subtotalCents: Cents, discountCents: Cents, taxCents: Cents, totalCents: Cents, paidCents: Cents, creditCents: Cents, balanceCents: Cents }
+type OverdueEntry = { invoiceId: InvoiceId, customerName: string, dueOn: string, daysOverdue: number, balanceCents: Cents }
+type Stats = { draft: number, sent: number, paid: number, void: number, outstandingCents: Cents }
+type Receipt = { invoiceId: InvoiceId, totalCents: Cents, paidCents: Cents, signature: string }
+type AgingBuckets = { current: Cents, days1to30: Cents, days31to60: Cents, days61to90: Cents, over90: Cents }
+
+// ---- money (shared): whole cents only; every percentage goes through percentOf
+
+// basisPoints of amount (100 basis points = 1%), rounding halves to the nearest even cent.
+fn percentOf(amount: Cents, basisPoints: number): Cents {
+  let numerator = amount.value * basisPoints;
+  let negative = numerator < 0;
+  let n = abs(numerator);
+  let whole = floor(n / 10000);
+  let remainder = n - whole * 10000;
+  let twice = remainder * 2;
+  let mut r = whole;
+  if (twice > 10000) { r = whole + 1; }
+  if (twice == 10000) {
+    if (whole % 2 == 1) { r = whole + 1; }
+  }
+  if (negative) { return Cents(0 - r); }
+  return Cents(r);
+}
+
+fn addCents(a: Cents, b: Cents): Cents { return Cents(a.value + b.value); }
+
+fn subCents(a: Cents, b: Cents): Cents { return Cents(a.value - b.value); }
+
+fn timesCents(unit: Cents, quantity: number): Cents { return Cents(unit.value * quantity); }
+
+fn twoDigits(n: number): string {
+  if (n < 10) { return "0" + str(n); }
+  return str(n);
+}
+
+fn formatCents(cents: Cents): string {
+  let sign = if (cents.value < 0) { "-" } else { "" };
+  let a = abs(cents.value);
+  return sign + "$" + str(floor(a / 100)) + "." + twoDigits(a % 100);
+}
+
+// ---- dates (shared): "YYYY-MM-DD" text turned into a count of days and back, with whole numbers
+
+fn digits(s: string): number {
+  return match parseInt(s) {
+    ok(n) => n,
+    err(e) => 0,
+  };
+}
+
+fn toDays(iso: string): number {
+  let y0 = digits(substring(iso, 0, 4));
+  let m = digits(substring(iso, 5, 7));
+  let d = digits(substring(iso, 8, 10));
+  let y = if (m <= 2) { y0 - 1 } else { y0 };
+  let era = floor(y / 400);
+  let yoe = y - era * 400;
+  let mp = (m + 9) % 12;
+  let doy = floor((153 * mp + 2) / 5) + d - 1;
+  let doe = yoe * 365 + floor(yoe / 4) - floor(yoe / 100) + doy;
+  return era * 146097 + doe - 719468;
+}
+
+fn fromDays(days: number): string {
+  let z = days + 719468;
+  let era = floor(z / 146097);
+  let doe = z - era * 146097;
+  let yoe = floor((doe - floor(doe / 1460) + floor(doe / 36524) - floor(doe / 146096)) / 365);
+  let doy = doe - (365 * yoe + floor(yoe / 4) - floor(yoe / 100));
+  let mp = floor((5 * doy + 2) / 153);
+  let d = doy - floor((153 * mp + 2) / 5) + 1;
+  let m = if (mp < 10) { mp + 3 } else { mp - 9 };
+  let y = yoe + era * 400 + (if (m <= 2) { 1 } else { 0 });
+  return str(y) + "-" + twoDigits(m) + "-" + twoDigits(d);
+}
+
+fn addDays(iso: string, days: number): string { return fromDays(toDays(iso) + days); }
+
+fn daysBetween(a: string, b: string): number { return toDays(b) - toDays(a); }
+
+fn isAfter(a: string, b: string): boolean { return toDays(a) > toDays(b); }
+
+// ---- the server's idea of today, fixed so every run comes out the same
+
+fn today(): string { return "2026-10-01"; }
+
+// ---- the server's data: a fixed set that stands in for a database
+
+server fn customers(): List<Customer> {
+  return [
+    { id: CustomerId(1), name: "Ann Lee", email: "ann@example.com", phone: "555-0101", termsDays: 30, region: "east" },
+    { id: CustomerId(2), name: "Bo Chen", email: "bo@example.com", phone: null, termsDays: 15, region: "west" },
+    { id: CustomerId(3), name: "Cy Young", email: "cy@example.com", phone: "555-0103", termsDays: 30, region: "east" },
+    { id: CustomerId(4), name: "Di Park", email: "di@example.com", phone: null, termsDays: 45, region: "north" },
+    { id: CustomerId(5), name: "Ed Ruiz", email: "ed@example.com", phone: "555-0105", termsDays: 30, region: "west" },
+    { id: CustomerId(6), name: "Fay Wu", email: "fay@example.com", phone: null, termsDays: 15, region: "south" },
+    { id: CustomerId(7), name: "Gus Hale", email: "gus@example.com", phone: "555-0107", termsDays: 60, region: "east" },
+    { id: CustomerId(8), name: "Ivy Noor", email: "ivy@example.com", phone: null, termsDays: 30, region: "north" },
+  ];
+}
+
+server fn products(): List<Product> {
+  return [
+    { id: ProductId(1), name: "Widget", unitCents: Cents(1250), taxable: true },
+    { id: ProductId(2), name: "Gadget", unitCents: Cents(9999), taxable: true },
+    { id: ProductId(3), name: "Gizmo", unitCents: Cents(500), taxable: true },
+    { id: ProductId(4), name: "Consulting hour", unitCents: Cents(15000), taxable: false },
+    { id: ProductId(5), name: "Support plan", unitCents: Cents(4900), taxable: false },
+    { id: ProductId(6), name: "Cable", unitCents: Cents(799), taxable: true },
+    { id: ProductId(7), name: "Manual", unitCents: Cents(2500), taxable: false },
+    { id: ProductId(8), name: "Bracket", unitCents: Cents(325), taxable: true },
+    { id: ProductId(9), name: "Installation", unitCents: Cents(22000), taxable: false },
+    { id: ProductId(10), name: "Sticker pack", unitCents: Cents(150), taxable: true },
+    { id: ProductId(11), name: "Training day", unitCents: Cents(80000), taxable: false },
+    { id: ProductId(12), name: "Spare part", unitCents: Cents(1799), taxable: true },
+  ];
+}
+
+fn line(productId: number, quantity: number, unitCents: number): LineItem {
+  return { productId: ProductId(productId), quantity: quantity, unitCents: Cents(unitCents) };
+}
+
+server fn invoices(): List<Invoice> {
+  return [
+    { id: InvoiceId(1), customerId: CustomerId(1), issuedOn: "2026-08-01", status: Status.Sent, lines: [line(1, 2, 1250), line(4, 1, 15000)], discountPercent: 10, notes: "Thanks for the referral", sentOn: "2026-08-01", paidOn: null },
+    { id: InvoiceId(2), customerId: CustomerId(2), issuedOn: "2026-09-20", status: Status.Sent, lines: [line(2, 1, 9999)], discountPercent: 0, notes: null, sentOn: "2026-09-20", paidOn: null },
+    { id: InvoiceId(3), customerId: CustomerId(3), issuedOn: "2026-07-15", status: Status.Paid, lines: [line(3, 10, 500), line(6, 2, 799)], discountPercent: 0, notes: null, sentOn: "2026-07-15", paidOn: "2026-08-10" },
+    { id: InvoiceId(4), customerId: CustomerId(1), issuedOn: "2026-09-28", status: Status.Draft, lines: [line(5, 1, 4900)], discountPercent: 0, notes: "Renewal", sentOn: null, paidOn: null },
+    { id: InvoiceId(5), customerId: CustomerId(4), issuedOn: "2026-06-01", status: Status.Void, lines: [line(9, 1, 22000)], discountPercent: 0, notes: "Cancelled by customer", sentOn: "2026-06-01", paidOn: null },
+    { id: InvoiceId(6), customerId: CustomerId(5), issuedOn: "2026-07-20", status: Status.Sent, lines: [line(7, 3, 2500)], discountPercent: 0, notes: null, sentOn: "2026-07-20", paidOn: null },
+    { id: InvoiceId(7), customerId: CustomerId(6), issuedOn: "2026-09-01", status: Status.Sent, lines: [line(10, 20, 150), line(8, 4, 325)], discountPercent: 5, notes: null, sentOn: "2026-09-01", paidOn: null },
+    { id: InvoiceId(8), customerId: CustomerId(7), issuedOn: "2026-05-01", status: Status.Sent, lines: [line(11, 1, 80000)], discountPercent: 0, notes: "On-site", sentOn: "2026-05-01", paidOn: null },
+    { id: InvoiceId(9), customerId: CustomerId(8), issuedOn: "2026-09-10", status: Status.Draft, lines: [line(12, 2, 1799)], discountPercent: 0, notes: null, sentOn: null, paidOn: null },
+    { id: InvoiceId(10), customerId: CustomerId(3), issuedOn: "2026-09-25", status: Status.Sent, lines: [line(1, 1, 1250)], discountPercent: 0, notes: null, sentOn: "2026-09-25", paidOn: null },
+    { id: InvoiceId(11), customerId: CustomerId(2), issuedOn: "2026-04-01", status: Status.Paid, lines: [line(4, 4, 15000)], discountPercent: 0, notes: null, sentOn: "2026-04-01", paidOn: "2026-04-10" },
+    { id: InvoiceId(12), customerId: CustomerId(4), issuedOn: "2026-08-20", status: Status.Sent, lines: [line(2, 2, 9999), line(6, 1, 799)], discountPercent: 0, notes: null, sentOn: "2026-08-20", paidOn: null },
+    { id: InvoiceId(13), customerId: CustomerId(5), issuedOn: "2026-03-01", status: Status.Void, lines: [line(1, 5, 1250)], discountPercent: 0, notes: "Duplicate", sentOn: "2026-03-01", paidOn: null },
+    { id: InvoiceId(14), customerId: CustomerId(1), issuedOn: "2026-09-01", status: Status.Sent, lines: [line(3, 4, 500), line(10, 2, 150)], discountPercent: 0, notes: null, sentOn: "2026-09-01", paidOn: null },
+    { id: InvoiceId(15), customerId: CustomerId(7), issuedOn: "2026-02-01", status: Status.Sent, lines: [line(8, 10, 325)], discountPercent: 0, notes: null, sentOn: "2026-02-01", paidOn: null },
+    { id: InvoiceId(16), customerId: CustomerId(8), issuedOn: "2026-09-15", status: Status.Sent, lines: [line(5, 2, 4900)], discountPercent: 0, notes: null, sentOn: "2026-09-15", paidOn: null },
+    { id: InvoiceId(17), customerId: CustomerId(6), issuedOn: "2026-08-01", status: Status.Sent, lines: [line(6, 1, 799)], discountPercent: 0, notes: null, sentOn: "2026-08-01", paidOn: null },
+  ];
+}
+
+server fn payments(): List<Payment> {
+  return [
+    { invoiceId: InvoiceId(1), amountCents: Cents(10000), receivedOn: "2026-08-20", method: "card" },
+    { invoiceId: InvoiceId(3), amountCents: Cents(7126), receivedOn: "2026-08-10", method: "transfer" },
+    { invoiceId: InvoiceId(6), amountCents: Cents(7200), receivedOn: "2026-08-30", method: "card" },
+    { invoiceId: InvoiceId(8), amountCents: Cents(50000), receivedOn: "2026-06-15", method: "transfer" },
+    { invoiceId: InvoiceId(11), amountCents: Cents(60000), receivedOn: "2026-04-10", method: "card" },
+    { invoiceId: InvoiceId(12), amountCents: Cents(461), receivedOn: "2026-09-01", method: "cash" },
+    { invoiceId: InvoiceId(17), amountCents: Cents(163), receivedOn: "2026-08-10", method: "cash" },
+  ];
+}
+
+server fn creditNotes(): List<CreditNote> {
+  return [
+    { id: 1, invoiceId: InvoiceId(7), amountCents: Cents(429), reason: "damaged stickers" },
+    { id: 2, invoiceId: InvoiceId(8), amountCents: Cents(5000), reason: "late delivery" },
+  ];
+}
+
+server fn findCustomer(id: CustomerId): Customer | null {
+  for (c in customers()) { if (c.id == id) { return c; } }
+  return null;
+}
+
+server fn findProduct(id: ProductId): Product | null {
+  for (p in products()) { if (p.id == id) { return p; } }
+  return null;
+}
+
+server fn findInvoice(id: InvoiceId): Invoice | null {
+  for (i in invoices()) { if (i.id == id) { return i; } }
+  return null;
+}
+
+// ---- invoices: what they add up to, when they are due, and the one place a status may change
+
+// Sales tax, in basis points: 8%. Charged on taxable products only.
+fn taxBasisPoints(): number { return 800; }
+
+server fn getInvoice(id: InvoiceId): Result<Invoice, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  return ok(inv);
+}
+
+server fn subtotalOf(inv: Invoice): Cents {
+  let mut total = Cents(0);
+  for (l in inv.lines) { total = addCents(total, timesCents(l.unitCents, l.quantity)); }
+  return total;
+}
+
+// The part of the subtotal that tax applies to: lines whose product is taxable.
+server fn taxableSubtotalOf(inv: Invoice): Cents {
+  let mut total = Cents(0);
+  for (l in inv.lines) {
+    let p = findProduct(l.productId);
+    if (p !== null) {
+      if (p.taxable) { total = addCents(total, timesCents(l.unitCents, l.quantity)); }
+    }
+  }
+  return total;
+}
+
+server fn paidOn(id: InvoiceId): Cents {
+  let mut total = Cents(0);
+  for (p in payments()) { if (p.invoiceId == id) { total = addCents(total, p.amountCents); } }
+  return total;
+}
+
+server fn creditedOn(id: InvoiceId): Cents {
+  let mut total = Cents(0);
+  for (c in creditNotes()) { if (c.invoiceId == id) { total = addCents(total, c.amountCents); } }
+  return total;
+}
+
+server fn totalsOf(inv: Invoice): Totals {
+  let subtotalCents = subtotalOf(inv);
+  let discountCents = percentOf(subtotalCents, inv.discountPercent * 100);
+  let taxCents = percentOf(taxableSubtotalOf(inv), taxBasisPoints());
+  let totalCents = addCents(subCents(subtotalCents, discountCents), taxCents);
+  let paidCents = paidOn(inv.id);
+  let creditCents = creditedOn(inv.id);
+  return { subtotalCents: subtotalCents, discountCents: discountCents, taxCents: taxCents, totalCents: totalCents, paidCents: paidCents, creditCents: creditCents, balanceCents: subCents(subCents(totalCents, paidCents), creditCents) };
+}
+
+server fn invoiceTotals(id: InvoiceId): Result<Totals, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  return ok(totalsOf(inv));
+}
+
+// The day payment is due: the customer's terms counted from the day the invoice was issued.
+server fn dueOn(inv: Invoice): Result<string, string> {
+  let c = findCustomer(inv.customerId);
+  if (c === null) { return err("no such customer"); }
+  return ok(addDays(inv.issuedOn, c.termsDays));
+}
+
+// Days past due as of today, or 0 if not overdue (only sent invoices can be overdue).
+server fn daysOverdue(inv: Invoice): Result<number, string> {
+  if (inv.status != Status.Sent) { return ok(0); }
+  match dueOn(inv) {
+    ok(due) => {
+      if (!isAfter(today(), due)) { return ok(0); }
+      return ok(daysBetween(due, today()));
+    }
+    err(e) => { return err(e); }
+  }
+}
+
+// Moves an invoice to its next status and stamps the date. This is the only place a status may
+// change: it refuses moves the business does not allow (paying a void invoice, sending a paid one, ...).
+server fn transition(inv: Invoice, next: Status): Result<Invoice, string> {
+  if (inv.status == Status.Paid) { return err("invoice is already paid"); }
+  if (inv.status == Status.Void) { return err("invoice is void"); }
+  match next {
+    Draft => { return err("an invoice cannot go back to draft"); }
+    Sent => {
+      if (inv.status == Status.Sent) { return err("invoice is already sent"); }
+      return ok({ ...inv, status: Status.Sent, sentOn: today() });
+    }
+    Paid => {
+      if (inv.status == Status.Draft) { return err("a draft invoice cannot be paid"); }
+      return ok({ ...inv, status: Status.Paid, paidOn: today() });
+    }
+    Void => { return ok({ ...inv, status: Status.Void }); }
+  }
+}
+
+// Checks that a draft invoice is complete enough to be sent to the customer.
+server fn readyToSend(inv: Invoice): Result<boolean, string> {
+  if (len(inv.lines) == 0) { return err("invoice has no lines"); }
+  for (l in inv.lines) {
+    if (l.quantity < 1) { return err("line quantity must be at least 1"); }
+    if (findProduct(l.productId) === null) { return err("line refers to an unknown product"); }
+  }
+  let c = findCustomer(inv.customerId);
+  if (c === null) { return err("no such customer"); }
+  if (c.email == "") { return err("customer has no email address"); }
+  return ok(true);
+}
+
+// ---- customers and products
+
+server fn getCustomer(id: CustomerId): Result<Customer, string> {
+  let c = findCustomer(id);
+  if (c === null) { return err("no such customer"); }
+  return ok(c);
+}
+
+server fn getProduct(id: ProductId): Result<Product, string> {
+  let p = findProduct(id);
+  if (p === null) { return err("no such product"); }
+  return ok(p);
+}
+
+server fn customerInvoices(customerId: CustomerId): Result<List<Invoice>, string> {
+  let c = findCustomer(customerId);
+  if (c === null) { return err("no such customer"); }
+  let mut out: List<Invoice> = [];
+  for (i in invoices()) { if (i.customerId == customerId) { out = push(out, i); } }
+  return ok(out);
+}
+
+// True when the invoice exists and belongs to the customer.
+server fn invoiceBelongsTo(invoiceId: InvoiceId, customerId: CustomerId): boolean {
+  let inv = findInvoice(invoiceId);
+  if (inv === null) { return false; }
+  return inv.customerId == customerId;
+}
+
+server fn listProducts(): Result<List<Product>, string> { return ok(products()); }
+
+// Products whose name contains the text, ignoring case. An empty search is an error.
+server fn searchProducts(text: string): Result<List<Product>, string> {
+  let needle = toLower(trim(text));
+  if (needle == "") { return err("search text is empty"); }
+  let mut out: List<Product> = [];
+  for (p in products()) { if (contains(toLower(p.name), needle)) { out = push(out, p); } }
+  return ok(out);
+}
+
+server fn customersInRegion(region: string): Result<List<Customer>, string> {
+  let mut out: List<Customer> = [];
+  for (c in customers()) { if (c.region == region) { out = push(out, c); } }
+  if (len(out) == 0) { return err("no customers in region " + region); }
+  return ok(out);
+}
+
+// ---- payments and credit notes
+
+server fn paymentsFor(id: InvoiceId): Result<List<Payment>, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  let mut out: List<Payment> = [];
+  for (p in payments()) { if (p.invoiceId == id) { out = push(out, p); } }
+  return ok(out);
+}
+
+// Whether a payment of this size could be taken on the invoice as it stands; gives the balance left after it.
+server fn paymentAllowed(id: InvoiceId, amountCents: Cents): Result<Cents, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  if (inv.status == Status.Draft) { return err("invoice has not been sent"); }
+  if (inv.status == Status.Void) { return err("invoice is void"); }
+  if (inv.status == Status.Paid) { return err("invoice is already paid"); }
+  if (amountCents.value <= 0) { return err("payment must be more than zero"); }
+  let balance = totalsOf(inv).balanceCents;
+  if (amountCents.value > balance.value) { return err("payment exceeds balance"); }
+  return ok(subCents(balance, amountCents));
+}
+
+server fn creditsFor(id: InvoiceId): Result<List<CreditNote>, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  let mut out: List<CreditNote> = [];
+  for (c in creditNotes()) { if (c.invoiceId == id) { out = push(out, c); } }
+  return ok(out);
+}
+
+// The total credited on one of a customer's invoices. The customer id is checked first so a
+// customer can only ever see credits on their own invoices.
+server fn creditTotal(customerId: CustomerId, invoiceId: InvoiceId): Result<Cents, string> {
+  if (!invoiceBelongsTo(invoiceId, customerId)) { return err("invoice does not belong to customer"); }
+  return ok(creditedOn(invoiceId));
+}
+
+// ---- reminders and signed receipts
+
+server fn reminderText(id: InvoiceId): Result<string, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  if (inv.status != Status.Sent) { return err("only a sent invoice can be reminded"); }
+  let c = findCustomer(inv.customerId);
+  if (c === null) { return err("no such customer"); }
+  match dueOn(inv) {
+    ok(due) => {
+      match daysOverdue(inv) {
+        ok(late) => {
+          let balance = formatCents(totalsOf(inv).balanceCents);
+          if (late == 0) {
+            return ok("To: " + c.email + "\nHello " + c.name + ", invoice #" + str(inv.id.value) + " for " + balance + " is due on " + due + ".");
+          }
+          return ok("To: " + c.email + "\nHello " + c.name + ", invoice #" + str(inv.id.value) + " for " + balance + " was due on " + due + " and is " + str(late) + " days overdue.");
+        }
+        err(e) => { return err(e); }
+      }
+    }
+    err(e) => { return err(e); }
+  }
+}
+
+// A receipt for a sent or paid invoice, signed as "<invoice id>:<total>:<paid>" with the webhook secret.
+server fn signedReceipt(id: InvoiceId): Result<Receipt, string> {
+  let inv = findInvoice(id);
+  if (inv === null) { return err("no such invoice"); }
+  if (inv.status == Status.Draft) { return err("invoice has not been sent"); }
+  if (inv.status == Status.Void) { return err("invoice is void"); }
+  let t = totalsOf(inv);
+  let key = secret("WEBHOOK_SECRET");
+  let signature = sign(key, str(inv.id.value) + ":" + str(t.totalCents.value) + ":" + str(t.paidCents.value));
+  return ok({ invoiceId: inv.id, totalCents: t.totalCents, paidCents: t.paidCents, signature: signature });
+}
+
+// ---- reports
+
+server fn dashboardStats(): Result<Stats, string> {
+  let mut draft = 0;
+  let mut sent = 0;
+  let mut paid = 0;
+  let mut voided = 0;
+  let mut outstanding = Cents(0);
+  for (inv in invoices()) {
+    match inv.status {
+      Draft => { draft = draft + 1; }
+      Sent => {
+        sent = sent + 1;
+        outstanding = addCents(outstanding, totalsOf(inv).balanceCents);
+      }
+      Paid => { paid = paid + 1; }
+      Void => { voided = voided + 1; }
+    }
+  }
+  return ok({ draft: draft, sent: sent, paid: paid, void: voided, outstandingCents: outstanding });
+}
+
+// Sent invoices past their due date, oldest due date first.
+server fn overdueInvoices(): Result<List<OverdueEntry>, string> {
+  let mut found: List<OverdueEntry> = [];
+  for (inv in invoices()) {
+    match daysOverdue(inv) {
+      ok(late) => {
+        if (late > 0) {
+          match dueOn(inv) {
+            ok(due) => {
+              let c = findCustomer(inv.customerId);
+              if (c === null) { return err("no such customer"); }
+              found = push(found, { invoiceId: inv.id, customerName: c.name, dueOn: due, daysOverdue: late, balanceCents: totalsOf(inv).balanceCents });
+            }
+            err(e) => { return err(e); }
+          }
+        }
+      }
+      err(e) => { return err(e); }
+    }
+  }
+  // sort by due date: pick the earliest not yet taken, one at a time
+  let mut sorted: List<OverdueEntry> = [];
+  let mut taken: List<number> = [];
+  for (step in range(0, len(found))) {
+    let mut best: OverdueEntry | null = null;
+    for (e in found) {
+      if (!has(taken, e.invoiceId.value)) {
+        if (best === null) { best = e; }
+        else if (e.dueOn < best.dueOn) { best = e; }
+      }
+    }
+    if (best !== null) {
+      sorted = push(sorted, best);
+      taken = push(taken, best.invoiceId.value);
+    }
+  }
+  return ok(sorted);
+}
+
+server fn agingReport(): Result<AgingBuckets, string> {
+  let mut current = Cents(0);
+  let mut d1 = Cents(0);
+  let mut d31 = Cents(0);
+  let mut d61 = Cents(0);
+  let mut over = Cents(0);
+  for (inv in invoices()) {
+    if (inv.status == Status.Sent) {
+      match daysOverdue(inv) {
+        ok(late) => {
+          let balance = totalsOf(inv).balanceCents;
+          if (late == 0) { current = addCents(current, balance); }
+          else if (late <= 30) { d1 = addCents(d1, balance); }
+          else if (late <= 60) { d31 = addCents(d31, balance); }
+          else if (late <= 90) { d61 = addCents(d61, balance); }
+          else { over = addCents(over, balance); }
+        }
+        err(e) => { return err(e); }
+      }
+    }
+  }
+  return ok({ current: current, days1to30: d1, days31to60: d31, days61to90: d61, over90: over });
+}
+
+// ---- client: text for each screen
+
+fn statusWord(s: Status): string {
+  return match s {
+    Draft => "draft",
+    Sent => "sent",
+    Paid => "paid",
+    Void => "void",
+  };
+}
+
+fn discountNote(percent: number): string {
+  if (percent == 0) { return ""; }
+  return " (" + str(percent) + "% off)";
+}
+
+client fn invoiceView(invoiceId: InvoiceId): string {
+  match getInvoice(invoiceId) {
+    ok(inv) => {
+      match getCustomer(inv.customerId) {
+        ok(cust) => {
+          match invoiceTotals(invoiceId) {
+            ok(t) => {
+              let mut lines: List<string> = [];
+              lines = push(lines, "Invoice #" + str(inv.id.value) + " for " + cust.name);
+              lines = push(lines, "Status: " + statusWord(inv.status));
+              lines = push(lines, "Issued: " + inv.issuedOn);
+              for (l in inv.lines) {
+                let name = match getProduct(l.productId) {
+                  ok(p) => p.name,
+                  err(e) => "product #" + str(l.productId.value),
+                };
+                lines = push(lines, "  " + str(l.quantity) + " x " + name + " @ " + formatCents(l.unitCents) + " = " + formatCents(timesCents(l.unitCents, l.quantity)));
+              }
+              lines = push(lines, "Subtotal: " + formatCents(t.subtotalCents));
+              if (t.discountCents.value != 0) { lines = push(lines, "Discount" + discountNote(inv.discountPercent) + ": -" + formatCents(t.discountCents)); }
+              lines = push(lines, "Tax: " + formatCents(t.taxCents));
+              lines = push(lines, "Total: " + formatCents(t.totalCents));
+              if (t.paidCents.value != 0) { lines = push(lines, "Paid: " + formatCents(t.paidCents)); }
+              if (t.creditCents.value != 0) { lines = push(lines, "Credits: " + formatCents(t.creditCents)); }
+              lines = push(lines, "Balance: " + formatCents(t.balanceCents));
+              if (inv.notes !== null) { lines = push(lines, "Notes: " + inv.notes); }
+              return join(lines, "\n");
+            }
+            err(e) => { return "error: " + e; }
+          }
+        }
+        err(e) => { return "error: " + e; }
+      }
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+// One line per product: "Widget - $12.50" with "(taxable)" when tax applies.
+client fn productLabel(productId: ProductId): string {
+  match getProduct(productId) {
+    ok(p) => {
+      let tax = if (p.taxable) { " (taxable)" } else { "" };
+      return p.name + " - " + formatCents(p.unitCents) + tax;
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+// The signed receipt for an invoice, as one line.
+client fn receiptLine(invoiceId: InvoiceId): string {
+  match signedReceipt(invoiceId) {
+    ok(r) => { return "Receipt #" + str(r.invoiceId.value) + ": total " + formatCents(r.totalCents) + ", paid " + formatCents(r.paidCents) + " [" + r.signature + "]"; }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+// The reminder email the server would send, as text.
+client fn reminderPreview(invoiceId: InvoiceId): string {
+  match reminderText(invoiceId) {
+    ok(text) => { return text; }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn customerView(customerId: CustomerId): string {
+  match getCustomer(customerId) {
+    ok(c) => {
+      match customerInvoices(customerId) {
+        ok(invs) => {
+          let mut lines: List<string> = [];
+          lines = push(lines, c.name + " <" + c.email + ">");
+          lines = push(lines, "Terms: net " + str(c.termsDays));
+          lines = push(lines, "Region: " + c.region);
+          let mut owed = Cents(0);
+          for (inv in invs) {
+            match invoiceTotals(inv.id) {
+              ok(t) => {
+                let balance = if (inv.status == Status.Sent) { t.balanceCents } else { Cents(0) };
+                owed = addCents(owed, balance);
+                lines = push(lines, "  #" + str(inv.id.value) + " " + inv.issuedOn + " " + statusWord(inv.status) + " total " + formatCents(t.totalCents) + " balance " + formatCents(balance));
+              }
+              err(e) => { return "error: " + e; }
+            }
+          }
+          lines = push(lines, "Outstanding: " + formatCents(owed));
+          return join(lines, "\n");
+        }
+        err(e) => { return "error: " + e; }
+      }
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+// "Ann Lee <ann@example.com>" for a customer.
+client fn contactLine(customerId: CustomerId): string {
+  match getCustomer(customerId) {
+    ok(c) => { return c.name + " <" + c.email + ">"; }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn dashboardView(): string {
+  match dashboardStats() {
+    ok(v) => {
+      return "Draft: " + str(v.draft) + "\nSent: " + str(v.sent) + "\nPaid: " + str(v.paid) + "\nVoid: " + str(v.void) + "\nOutstanding: " + formatCents(v.outstandingCents);
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn overdueView(): string {
+  match overdueInvoices() {
+    ok(entries) => {
+      if (len(entries) == 0) { return "Nothing overdue"; }
+      let mut lines: List<string> = [];
+      for (e in entries) {
+        lines = push(lines, "#" + str(e.invoiceId.value) + " " + e.customerName + ": " + formatCents(e.balanceCents) + " due " + e.dueOn + ", " + str(e.daysOverdue) + " days overdue");
+      }
+      return join(lines, "\n");
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn catalogView(): string {
+  match listProducts() {
+    ok(ps) => {
+      let mut lines: List<string> = [];
+      for (p in ps) {
+        let tax = if (p.taxable) { " (taxable)" } else { "" };
+        lines = push(lines, p.name + " - " + formatCents(p.unitCents) + tax);
+      }
+      return join(lines, "\n");
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn searchView(text: string): string {
+  match searchProducts(text) {
+    ok(ps) => {
+      if (len(ps) == 0) { return "No products match"; }
+      let mut lines: List<string> = [];
+      for (p in ps) { lines = push(lines, p.name + " - " + formatCents(p.unitCents)); }
+      return join(lines, "\n");
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn regionView(region: string): string {
+  match customersInRegion(region) {
+    ok(cs) => {
+      let mut lines: List<string> = [];
+      for (c in cs) { lines = push(lines, c.name + " (net " + str(c.termsDays) + ")"); }
+      return join(lines, "\n");
+    }
+    err(e) => { return "error: " + e; }
+  }
+}
+
+client fn agingView(): string {
+  match agingReport() {
+    ok(b) => {
+      return "Current: " + formatCents(b.current) + "\n1-30 days: " + formatCents(b.days1to30) + "\n31-60 days: " + formatCents(b.days31to60) + "\n61-90 days: " + formatCents(b.days61to90) + "\nOver 90 days: " + formatCents(b.over90);
+    }
+    err(e) => { return "error: " + e; }
+  }
+}

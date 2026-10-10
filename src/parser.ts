@@ -12,6 +12,14 @@ const RESERVED = new Set([
   'true', 'false', 'null', 'undefined', 'export', 'class', 'async', 'await', 'new', 'enum', 'newtype',
 ]);
 
+/** Words JavaScript reserves: fine as record field names, but not as the name of a binding or function. */
+const JS_RESERVED = new Set([
+  'void', 'typeof', 'delete', 'in', 'instanceof', 'this', 'super', 'switch', 'case', 'default', 'do', 'break', 'continue',
+  'debugger', 'import', 'extends', 'finally', 'static', 'package', 'private', 'protected', 'public', 'implements', 'with', 'yield',
+  'arguments', 'eval', 'Object', 'Array', 'String', 'Number', 'Boolean', 'Promise', 'JSON', 'Math',
+]);
+const BINDING_KINDS = new Set(['variable name', 'parameter name', 'function name', 'loop variable', 'binding name']);
+
 const BINOPS: Record<string, number> = {
   '||': 1, '&&': 2,
   '==': 3, '!=': 3, '===': 3, '!==': 3,
@@ -67,7 +75,13 @@ class Parser {
 
   expectIdent(what = 'identifier'): Token {
     const t = this.peek();
-    if (t.kind === 'ident' && !RESERVED.has(t.text)) return this.next();
+    if (t.kind === 'ident' && !RESERVED.has(t.text)) {
+      // a name that JavaScript keeps for itself cannot name a binding or a function (fields are fine)
+      if (BINDING_KINDS.has(what) && JS_RESERVED.has(t.text)) {
+        this.fail(`'${t.text}' cannot be used as a ${what}; it is a reserved word.`, t.loc, what, `'${t.text}'`, 'TN0003');
+      }
+      return this.next();
+    }
     return this.fail(`${what[0].toUpperCase()}${what.slice(1)} expected.`, t.loc, what, this.desc(t));
   }
 

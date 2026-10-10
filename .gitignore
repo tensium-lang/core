@@ -3,3 +3,7 @@
 node_modules
 runs
 *.tmp
+
+# built programs and compiled output of the Experiment 5 apps
+harness/conventions/app/rs/bin/
+harness/conventions/app/tn/out/

@@ -107,7 +107,19 @@ export function unify(a: Ty, b: Ty): Ty | null {
   if (a.k === 'record' && b.k === 'record') {
     if (assignable(a, b) && assignable(b, a)) return a.name ? a : b;
     if (assignable(a, b)) return b;
-    return assignable(b, a) ? a : null;
+    if (assignable(b, a)) return a;
+    // two record values with the same fields but, say, `notes: string` in one and `notes: null` in the other
+    if (a.fields.length !== b.fields.length) return null;
+    const bm = new Map(b.fields);
+    const fields: [string, Ty][] = [];
+    for (const [n, t] of a.fields) {
+      const u = bm.has(n) ? unify(t, bm.get(n)!) : null;
+      if (!u) return null;
+      fields.push([n, u]);
+    }
+    const joined: Ty = { k: 'record', fields };
+    const named = [a, b].find((r) => r.name && assignable(joined, r) && assignable(r, joined));
+    return named ?? joined;
   }
   return assignable(a, b) && assignable(b, a) ? a : null;
 }
