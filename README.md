@@ -142,6 +142,22 @@ npx tsx harness/boundary.ts traps --suite silent --tasks 01-coupon-check,02-loya
 
 `verify`, `traps` and `init` all take `--arms` and `--tasks`. Baselines, predictions and the reading rule (comment fixes it / only the wrapper fixes it / neither): `harness/silent/PREREGISTRATION-4b.md`.
 
+## Experiment 5: ten conventions in a doc, three compilers
+
+Question: when a team's conventions are written once in `CONTRIBUTING.md` and an agent changes a 20-file app, does a compiler that enforces some of them stop more broken changes than one that enforces none? The same invoicing app in TypeScript (`tsc --strict` + eslint), Rust (`cargo` + clippy) and Tensium; ten tasks, one per convention; identical tickets and the identical conventions file in every arm.
+
+```
+npm install                                   # eslint is a dev dependency; Rust needs rustup (cargo in ~/.cargo/bin)
+npx tsx harness/conventions.ts verify         # no agents: starters, baseline and every reference solution, in every arm
+npx tsx harness/conventions.ts traps          # no agents: each task's tempting-wrong version through every checker
+npx tsx harness/conventions.ts init --run c1 --model opus --trials 2 [--arms ts,rs,tn] [--tasks ...]
+#   -> runs/c1/<task>__<arm>__t<k>/TASK.md; hand each to a fresh agent, which calls:
+#      npx tsx harness/conventions.ts submit <workdir>
+npx tsx harness/conventions.ts score c1
+```
+
+App, conventions and tasks: `harness/conventions/`. Pre-registration with the enforcement table, predictions and reading rules: `harness/conventions/PREREGISTRATION.md`.
+
 ## Experiment 1: feedback format
 
 Question: given the same task, language and model, does the *format* of compiler feedback change iterations-to-correct and final correctness?

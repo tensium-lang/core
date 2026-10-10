@@ -1,0 +1,26 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:27
+@@ -701,3 +701,22 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- recording a payment
++
++type PaymentReceipt = { invoiceId: InvoiceId, amountCents: Cents, balanceAfterCents: Cents }
++
++server fn recordPayment(id: InvoiceId, amountCents: Cents, method: string): Result<PaymentReceipt, string> {
++  if (trim(method) == "") { return err("payment method is missing"); }
++  match paymentAllowed(id, amountCents) {
++    ok(left) => { return ok({ invoiceId: id, amountCents: amountCents, balanceAfterCents: left }); }
++    err(e) => { return err(e); }
++  }
++}
++
++client fn paymentResult(invoiceId: InvoiceId, amountCents: Cents, method: string): string {
++  match recordPayment(invoiceId, amountCents, method) {
++    ok(r) => { return "Payment of " + formatCents(r.amountCents) + " recorded on #" + str(r.invoiceId.value) + "; balance now " + formatCents(r.balanceAfterCents); }
++    err(e) => { return "error: " + e; }
++  }
++}

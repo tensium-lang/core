@@ -1,0 +1,80 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:28
+@@ -3,6 +3,6 @@
+ 
+ export { connect } from './rpc.ts';
+ export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
+-export { contactLine, customerView } from './views/customer.ts';
++export { contactLine, creditSummary, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/customer.ts ts/client/views/customer.ts
+--- a/client/views/customer.ts	2026-10-10 11:47:04
++++ b/client/views/customer.ts	2026-10-10 12:24:28
+@@ -32,3 +32,13 @@
+   if (!c.ok) return 'error: ' + c.error;
+   return `${c.value.name} <${c.value.email}>`;
+ }
++
++/** "Credits for Fay Wu: #7 $4.29" for a customer. */
++export async function creditSummary(customerId: number): Promise<string> {
++  const c = await rpc<Customer>('getCustomer', [customerId]);
++  if (!c.ok) return 'error: ' + c.error;
++  const credits = await rpc<{ invoiceId: number; creditCents: number }[]>('customerCredits', [customerId]);
++  if (!credits.ok) return 'error: ' + credits.error;
++  if (credits.value.length === 0) return `Credits for ${c.value.name}: none`;
++  return `Credits for ${c.value.name}: ${credits.value.map((e) => `#${e.invoiceId} ${formatCents(e.creditCents)}`).join(', ')}`;
++}
+diff -ruN -x target -x bin -x out app/server/credits.ts ts/server/credits.ts
+--- a/server/credits.ts	2026-10-10 11:47:05
++++ b/server/credits.ts	2026-10-10 12:24:28
+@@ -2,7 +2,7 @@
+ // goods, late delivery and so on), and the total credited on an invoice.
+ 
+ import type { Cents, CreditNote, CustomerId, InvoiceId, Result } from '../shared/types.ts';
+-import { invoiceBelongsTo } from './customers.ts';
++import { customerInvoices, invoiceBelongsTo } from './customers.ts';
+ import { CREDIT_NOTES, findInvoice } from './data.ts';
+ import { sumCents } from './lib/money.ts';
+ import { err, ok } from './lib/result.ts';
+@@ -20,4 +20,19 @@
+ export function creditTotal(customerId: CustomerId, invoiceId: InvoiceId): Result<Cents, string> {
+   if (!invoiceBelongsTo(invoiceId, customerId)) return err('invoice does not belong to customer');
+   return ok(sumCents(CREDIT_NOTES.filter((c) => c.invoiceId === invoiceId).map((c) => c.amountCents)));
++}
++
++export type CreditSummaryEntry = { invoiceId: InvoiceId; creditCents: Cents };
++
++/** For each of a customer's invoices that has credit notes: the invoice and the total credited. */
++export function customerCredits(customerId: CustomerId): Result<CreditSummaryEntry[], string> {
++  const invoices = customerInvoices(customerId);
++  if (!invoices.ok) return invoices;
++  const out: CreditSummaryEntry[] = [];
++  for (const inv of invoices.value) {
++    const total = creditTotal(inv.id, customerId);
++    if (!total.ok) return total;
++    if (total.value !== 0) out.push({ invoiceId: inv.id, creditCents: total.value });
++  }
++  return ok(out);
+ }
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:28
+@@ -6,7 +6,7 @@
+ import type { AddressInfo } from 'node:net';
+ import { agingReport } from './aging.ts';
+ import { customersInRegion, listProducts, searchProducts } from './catalog.ts';
+-import { creditsFor } from './credits.ts';
++import { creditsFor, customerCredits } from './credits.ts';
+ import { customerInvoices, getCustomer, getProduct } from './customers.ts';
+ import { getInvoice, invoiceTotals } from './invoices.ts';
+ import { paymentsFor } from './payments.ts';
+@@ -30,6 +30,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  customerCredits: (a) => customerCredits(a[0] as number),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */

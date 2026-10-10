@@ -1,0 +1,36 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:28
+@@ -2,7 +2,7 @@
+ // the app can show.
+ 
+ export { connect } from './rpc.ts';
+-export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
++export { invoiceView, productLabel, receiptLine, reminderPreview, webhookStatus } from './views/invoice.ts';
+ export { contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/invoice.ts ts/client/views/invoice.ts
+--- a/client/views/invoice.ts	2026-10-10 11:47:04
++++ b/client/views/invoice.ts	2026-10-10 12:24:28
+@@ -1,6 +1,7 @@
+ // The invoice screen: asks the server for an invoice, its customer, its products and its totals,
+ // and lays them out as the lines of text a person sees.
+ 
++import { createHmac } from 'node:crypto';
+ import type { Customer, Invoice, Product, Receipt, Totals } from '../../shared/types.ts';
+ import { discountNote, formatCents, statusWord } from '../format.ts';
+ import { rpc } from '../rpc.ts';
+@@ -52,4 +53,12 @@
+   const r = await rpc<string>('reminderText', [invoiceId]);
+   if (!r.ok) return 'error: ' + r.error;
+   return r.value;
++}
++
++/** Whether a webhook payload is genuine, as one word. */
++export async function webhookStatus(invoiceId: number, paidCents: number, signature: string): Promise<string> {
++  const r = await rpc<Receipt>('signedReceipt', [invoiceId]);
++  if (!r.ok) return 'error: ' + r.error;
++  const expected = createHmac('sha256', process.env.WEBHOOK_SECRET ?? '').update(`${invoiceId}:${r.value.totalCents}:${paidCents}`).digest('hex').slice(0, 16);
++  return expected === signature && r.value.paidCents === paidCents ? 'genuine' : 'forged';
+ }

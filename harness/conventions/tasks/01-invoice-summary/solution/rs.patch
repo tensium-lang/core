@@ -1,0 +1,77 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:27
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "summaryLine" => Ok(views::invoice::summary_line(num(a, 0)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:27
+@@ -75,3 +75,11 @@
+         Err(e) => format!("error: {}", e),
+     }
+ }
++
++/// The one-line summary of an invoice.
++pub fn summary_line(invoice_id: i64) -> String {
++    match rpc::<String>("invoiceSummary", &[json!(invoice_id)]) {
++        Ok(text) => text,
++        Err(e) => format!("error: {}", e),
++    }
++}
+diff -ruN -x target -x bin -x out app/server/src/invoices.rs rs/server/src/invoices.rs
+--- a/server/src/invoices.rs	2026-10-10 12:00:46
++++ b/server/src/invoices.rs	2026-10-10 12:24:27
+@@ -3,7 +3,7 @@
+ // and whether a draft is complete enough to send. Status changes go through shared::transition.
+ 
+ use shared::dates::{add_days, days_between, is_after};
+-use shared::money::{add, percent_of, sub, sum_cents, times};
++use shared::money::{add, format_cents, percent_of, sub, sum_cents, times};
+ use shared::{Cents, Invoice, InvoiceId, Status, Totals};
+ 
+ use crate::clock::TODAY;
+@@ -92,4 +92,18 @@
+         return Err("customer has no email address".to_string());
+     }
+     Ok(())
++}
++
++/// "#1 Ann Lee sent total $159.50 balance $59.50" for an invoice.
++pub fn invoice_summary(id: InvoiceId) -> Result<String, String> {
++    let inv = get_invoice(id)?;
++    let c = find_customer(inv.customer_id).ok_or_else(|| "no such customer".to_string())?;
++    let t = totals_of(&inv);
++    let status = match inv.status() {
++        Status::Draft => "draft",
++        Status::Sent => "sent",
++        Status::Paid => "paid",
++        Status::Void => "void",
++    };
++    Ok(format!("#{} {} {} total {} balance {}", inv.id.0, c.name, status, format_cents(t.total_cents), format_cents(t.balance_cents)))
+ }
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:27
+@@ -11,7 +11,7 @@
+ use crate::catalog::{customers_in_region, list_products, search_products};
+ use crate::credits::credits_for;
+ use crate::customers::{customer_invoices, get_customer, get_product};
+-use crate::invoices::{get_invoice, invoice_totals};
++use crate::invoices::{get_invoice, invoice_summary, invoice_totals};
+ use crate::payments::payments_for;
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("invoiceSummary", |a| out(invoice_summary(InvoiceId(num(a, 0)?)))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

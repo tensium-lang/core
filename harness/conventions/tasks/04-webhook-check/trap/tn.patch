@@ -1,0 +1,20 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,16 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- checking a webhook payload
++
++client fn webhookStatus(invoiceId: InvoiceId, paidCents: Cents, signature: string): string {
++  match signedReceipt(invoiceId) {
++    ok(r) => {
++      let key = secret("WEBHOOK_SECRET");
++      let expected = sign(key, str(invoiceId.value) + ":" + str(r.totalCents.value) + ":" + str(paidCents.value));
++      return if (expected == signature && r.paidCents == paidCents) { "genuine" } else { "forged" };
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

@@ -1,0 +1,106 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "revenueView" => Ok(views::revenue::revenue_view()),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/mod.rs rs/client/src/views/mod.rs
+--- a/client/src/views/mod.rs	2026-10-10 12:00:46
++++ b/client/src/views/mod.rs	2026-10-10 12:24:28
+@@ -4,3 +4,4 @@
+ pub mod customer;
+ pub mod dashboard;
+ pub mod invoice;
++pub mod revenue;
+diff -ruN -x target -x bin -x out app/client/src/views/revenue.rs rs/client/src/views/revenue.rs
+--- a/client/src/views/revenue.rs	1969-12-31 19:00:00
++++ b/client/src/views/revenue.rs	2026-10-10 12:24:28
+@@ -0,0 +1,20 @@
++// The revenue screen: one line per month with the money paid in it.
++
++use shared::Cents;
++
++use crate::format::format_cents;
++use crate::rpc::rpc;
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct MonthRevenue {
++    month: String,
++    paid_cents: Cents,
++}
++
++pub fn revenue_view() -> String {
++    match rpc::<Vec<MonthRevenue>>("revenueByMonth", &[]) {
++        Ok(ms) => ms.iter().map(|m| format!("{}: {}", m.month, format_cents(m.paid_cents))).collect::<Vec<_>>().join("\n"),
++        Err(e) => format!("error: {}", e),
++    }
++}
+diff -ruN -x target -x bin -x out app/server/src/lib.rs rs/server/src/lib.rs
+--- a/server/src/lib.rs	2026-10-10 12:01:18
++++ b/server/src/lib.rs	2026-10-10 12:24:28
+@@ -14,5 +14,6 @@
+ pub mod payments;
+ pub mod reminders;
+ pub mod reports;
++pub mod revenue;
+ pub mod rpc;
+ pub mod webhooks;
+diff -ruN -x target -x bin -x out app/server/src/revenue.rs rs/server/src/revenue.rs
+--- a/server/src/revenue.rs	1969-12-31 19:00:00
++++ b/server/src/revenue.rs	2026-10-10 12:24:28
+@@ -0,0 +1,30 @@
++// The revenue report: for each month in which invoices were paid, the total of those invoices.
++
++use std::collections::BTreeMap;
++
++use shared::{Cents, Status};
++
++use crate::data::invoices;
++use crate::invoices::totals_of;
++
++#[derive(serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct MonthRevenue {
++    pub month: String,
++    pub paid_cents: Cents,
++}
++
++/// One entry per month with a paid invoice, oldest first.
++pub fn revenue_by_month() -> Result<Vec<MonthRevenue>, String> {
++    let mut by_month: BTreeMap<String, i64> = BTreeMap::new();
++    for inv in invoices() {
++        if inv.status() != Status::Paid {
++            continue;
++        }
++        if let Some(paid_on) = &inv.paid_on {
++            let month: String = paid_on.chars().take(7).collect();
++            *by_month.entry(month).or_insert(0) += totals_of(&inv).total_cents.0;
++        }
++    }
++    Ok(by_month.into_iter().map(|(month, cents)| MonthRevenue { month, paid_cents: Cents(cents) }).collect())
++}
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:28
+@@ -16,6 +16,7 @@
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+ use crate::webhooks::signed_receipt;
++use crate::revenue::revenue_by_month;
+ 
+ /// Every route takes the JSON arguments and gives back a Result: the client reads `ok` on everything.
+ type Handler = fn(&[Value]) -> Result<Value, String>;
+@@ -50,6 +51,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("revenueByMonth", |_| out(revenue_by_month())),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

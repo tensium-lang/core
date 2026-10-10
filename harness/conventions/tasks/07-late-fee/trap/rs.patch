@@ -1,0 +1,90 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "lateFeeLine" => Ok(views::invoice::late_fee_line(num(a, 0)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:28
+@@ -4,7 +4,7 @@
+ 
+ use serde_json::json;
+ use shared::money::times;
+-use shared::{Customer, Invoice, Product, Receipt, Totals};
++use shared::{Cents, Customer, Invoice, InvoiceId, Product, Receipt, Totals};
+ 
+ use crate::format::{discount_note, format_cents, status_word};
+ use crate::rpc::rpc;
+@@ -72,6 +72,23 @@
+ pub fn reminder_preview(invoice_id: i64) -> String {
+     match rpc::<String>("reminderText", &[json!(invoice_id)]) {
+         Ok(text) => text,
++        Err(e) => format!("error: {}", e),
++    }
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct LateFee {
++    invoice_id: InvoiceId,
++    periods: i64,
++    fee_cents: Cents,
++}
++
++/// The late fee on an invoice, as one line.
++pub fn late_fee_line(invoice_id: i64) -> String {
++    match rpc::<LateFee>("lateFee", &[json!(invoice_id)]) {
++        Ok(f) if f.periods == 0 => format!("No late fee for #{}", f.invoice_id.0),
++        Ok(f) => format!("Late fee for #{}: {} ({} period{})", f.invoice_id.0, format_cents(f.fee_cents), f.periods, if f.periods == 1 { "" } else { "s" }),
+         Err(e) => format!("error: {}", e),
+     }
+ }
+diff -ruN -x target -x bin -x out app/server/src/invoices.rs rs/server/src/invoices.rs
+--- a/server/src/invoices.rs	2026-10-10 12:00:46
++++ b/server/src/invoices.rs	2026-10-10 12:24:28
+@@ -93,3 +93,19 @@
+     }
+     Ok(())
+ }
++
++#[derive(serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct LateFee {
++    pub invoice_id: InvoiceId,
++    pub periods: i64,
++    pub fee_cents: Cents,
++}
++
++/// 1.5 % of the balance for each full 30-day period past due.
++pub fn late_fee(id: InvoiceId) -> Result<LateFee, String> {
++    let inv = get_invoice(id)?;
++    let periods = days_overdue(&inv)? / 30;
++    let fee_cents = if periods == 0 { Cents(0) } else { Cents((totals_of(&inv).balance_cents.0 as f64 * 0.015 * periods as f64).round() as i64) };
++    Ok(LateFee { invoice_id: inv.id, periods, fee_cents })
++}
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:28
+@@ -11,7 +11,7 @@
+ use crate::catalog::{customers_in_region, list_products, search_products};
+ use crate::credits::credits_for;
+ use crate::customers::{customer_invoices, get_customer, get_product};
+-use crate::invoices::{get_invoice, invoice_totals};
++use crate::invoices::{get_invoice, invoice_totals, late_fee};
+ use crate::payments::payments_for;
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("lateFee", |a| out(late_fee(InvoiceId(num(a, 0)?)))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

@@ -1,0 +1,22 @@
+diff -ruN -x target -x bin -x out app/client/src/views/customer.rs rs/client/src/views/customer.rs
+--- a/client/src/views/customer.rs	2026-10-10 12:00:46
++++ b/client/src/views/customer.rs	2026-10-10 12:24:28
+@@ -20,6 +20,7 @@
+     let mut lines: Vec<String> = Vec::new();
+     lines.push(format!("{} <{}>", c.name, c.email));
+     lines.push(format!("Terms: net {}", c.terms_days));
++    lines.push(format!("Phone: {}", c.phone.as_deref().unwrap_or("(none)")));
+     lines.push(format!("Region: {}", c.region));
+     let mut owed = Cents(0);
+     for inv in &invoices {
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:28
+@@ -25,6 +25,7 @@
+     let mut lines: Vec<String> = Vec::new();
+     lines.push(format!("Invoice #{} for {}", inv.id.0, cust.name));
+     lines.push(format!("Status: {}", status_word(inv.status())));
++    lines.push(format!("Phone: {}", cust.phone.as_deref().unwrap_or("(none)")));
+     lines.push(format!("Issued: {}", inv.issued_on));
+     for l in &inv.lines {
+         let name = match rpc::<Product>("getProduct", &[json!(l.product_id)]) {

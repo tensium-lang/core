@@ -1,0 +1,35 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,31 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- confirming a statement
++
++type StatementConfirmation = { customerId: CustomerId, outstandingCents: Cents }
++
++server fn confirmStatement(customerId: CustomerId, outstandingCents: Cents): Result<StatementConfirmation, string> {
++  match customerInvoices(customerId) {
++    ok(invs) => {
++      let mut owed = Cents(0);
++      for (inv in invs) { if (inv.status == Status.Sent) { owed = addCents(owed, totalsOf(inv).balanceCents); } }
++      if (owed != outstandingCents) { return err("outstanding has changed: expected " + formatCents(owed)); }
++      return ok({ customerId: customerId, outstandingCents: owed });
++    }
++    err(e) => { return err(e); }
++  }
++}
++
++client fn confirmStatementResult(customerId: CustomerId, outstandingCents: Cents): string {
++  match getCustomer(customerId) {
++    ok(c) => {
++      match confirmStatement(customerId, outstandingCents) {
++        ok(r) => { return "Statement for " + c.name + " confirmed at " + formatCents(r.outstandingCents); }
++        err(e) => { return "error: " + e; }
++      }
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

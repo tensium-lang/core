@@ -1,0 +1,35 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,31 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- late fees
++
++type LateFee = { invoiceId: InvoiceId, periods: number, feeCents: Cents }
++
++server fn lateFee(id: InvoiceId): Result<LateFee, string> {
++  let inv = findInvoice(id);
++  if (inv === null) { return err("no such invoice"); }
++  match daysOverdue(inv) {
++    ok(late) => {
++      let periods = floor(late / 30);
++      let fee = if (periods == 0) { Cents(0) } else { percentOf(totalsOf(inv).balanceCents, 150 * periods) };
++      return ok({ invoiceId: inv.id, periods: periods, feeCents: fee });
++    }
++    err(e) => { return err(e); }
++  }
++}
++
++client fn lateFeeLine(invoiceId: InvoiceId): string {
++  match lateFee(invoiceId) {
++    ok(f) => {
++      if (f.periods == 0) { return "No late fee for #" + str(f.invoiceId.value); }
++      let unit = if (f.periods == 1) { " period)" } else { " periods)" };
++      return "Late fee for #" + str(f.invoiceId.value) + ": " + formatCents(f.feeCents) + " (" + str(f.periods) + unit;
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

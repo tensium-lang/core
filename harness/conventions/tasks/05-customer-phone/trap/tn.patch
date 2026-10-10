@@ -1,0 +1,19 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -540,6 +540,7 @@
+               let mut lines: List<string> = [];
+               lines = push(lines, "Invoice #" + str(inv.id.value) + " for " + cust.name);
+               lines = push(lines, "Status: " + statusWord(inv.status));
++              lines = push(lines, "Phone: " + cust.phone);
+               lines = push(lines, "Issued: " + inv.issuedOn);
+               for (l in inv.lines) {
+                 let name = match getProduct(l.productId) {
+@@ -603,6 +604,7 @@
+           let mut lines: List<string> = [];
+           lines = push(lines, c.name + " <" + c.email + ">");
+           lines = push(lines, "Terms: net " + str(c.termsDays));
++          lines = push(lines, "Phone: " + c.phone);
+           lines = push(lines, "Region: " + c.region);
+           let mut owed = Cents(0);
+           for (inv in invs) {

@@ -1,0 +1,27 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,23 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- sending a draft invoice
++
++server fn sendInvoice(id: InvoiceId): Result<Invoice, string> {
++  let inv = findInvoice(id);
++  if (inv === null) { return err("no such invoice"); }
++  readyToSend(inv);
++  return transition(inv, Status.Sent);
++}
++
++client fn sendResult(invoiceId: InvoiceId): string {
++  match sendInvoice(invoiceId) {
++    ok(inv) => {
++      let sentOn = inv.sentOn;
++      if (sentOn === null) { return "Invoice #" + str(inv.id.value) + " sent"; }
++      return "Invoice #" + str(inv.id.value) + " sent on " + sentOn;
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

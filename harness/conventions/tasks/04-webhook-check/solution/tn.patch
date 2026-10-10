@@ -1,0 +1,23 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,19 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- checking a webhook payload
++
++server fn verifyWebhook(id: InvoiceId, paidCents: Cents, signature: string): Result<boolean, string> {
++  match signedReceipt(id) {
++    ok(r) => { return ok(r.paidCents == paidCents && r.signature == signature); }
++    err(e) => { return err(e); }
++  }
++}
++
++client fn webhookStatus(invoiceId: InvoiceId, paidCents: Cents, signature: string): string {
++  match verifyWebhook(invoiceId, paidCents, signature) {
++    ok(genuine) => { return if (genuine) { "genuine" } else { "forged" }; }
++    err(e) => { return "error: " + e; }
++  }
++}

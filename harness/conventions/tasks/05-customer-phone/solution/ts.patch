@@ -1,0 +1,22 @@
+diff -ruN -x target -x bin -x out app/client/views/customer.ts ts/client/views/customer.ts
+--- a/client/views/customer.ts	2026-10-10 11:47:04
++++ b/client/views/customer.ts	2026-10-10 12:24:28
+@@ -13,6 +13,7 @@
+   const lines: string[] = [];
+   lines.push(`${c.value.name} <${c.value.email}>`);
+   lines.push(`Terms: net ${c.value.termsDays}`);
++  lines.push(`Phone: ${c.value.phone ?? '(none)'}`);
+   lines.push(`Region: ${c.value.region}`);
+   let owed = 0;
+   for (const inv of invoices.value) {
+diff -ruN -x target -x bin -x out app/client/views/invoice.ts ts/client/views/invoice.ts
+--- a/client/views/invoice.ts	2026-10-10 11:47:04
++++ b/client/views/invoice.ts	2026-10-10 12:24:28
+@@ -15,6 +15,7 @@
+   const lines: string[] = [];
+   lines.push(`Invoice #${inv.value.id} for ${cust.value.name}`);
+   lines.push(`Status: ${statusWord(inv.value.status)}`);
++  lines.push(`Phone: ${cust.value.phone ?? '(none)'}`);
+   lines.push(`Issued: ${inv.value.issuedOn}`);
+   for (const l of inv.value.lines) {
+     const p = await rpc<Product>('getProduct', [l.productId]);

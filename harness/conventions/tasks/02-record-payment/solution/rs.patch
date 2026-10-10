@@ -1,0 +1,99 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:27
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "paymentResult" => Ok(views::invoice::payment_result(num(a, 0)?, num(a, 1)?, &text(a, 2)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:27
+@@ -4,7 +4,7 @@
+ 
+ use serde_json::json;
+ use shared::money::times;
+-use shared::{Customer, Invoice, Product, Receipt, Totals};
++use shared::{Cents, Customer, Invoice, InvoiceId, Product, Receipt, Totals};
+ 
+ use crate::format::{discount_note, format_cents, status_word};
+ use crate::rpc::rpc;
+@@ -72,6 +72,22 @@
+ pub fn reminder_preview(invoice_id: i64) -> String {
+     match rpc::<String>("reminderText", &[json!(invoice_id)]) {
+         Ok(text) => text,
++        Err(e) => format!("error: {}", e),
++    }
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct PaymentReceipt {
++    invoice_id: InvoiceId,
++    amount_cents: Cents,
++    balance_after_cents: Cents,
++}
++
++/// The outcome of recording a payment, as one line.
++pub fn payment_result(invoice_id: i64, amount_cents: i64, method: &str) -> String {
++    match rpc::<PaymentReceipt>("recordPayment", &[json!(invoice_id), json!(amount_cents), json!(method)]) {
++        Ok(r) => format!("Payment of {} recorded on #{}; balance now {}", format_cents(r.amount_cents), r.invoice_id.0, format_cents(r.balance_after_cents)),
+         Err(e) => format!("error: {}", e),
+     }
+ }
+diff -ruN -x target -x bin -x out app/server/src/payments.rs rs/server/src/payments.rs
+--- a/server/src/payments.rs	2026-10-10 12:00:46
++++ b/server/src/payments.rs	2026-10-10 12:24:27
+@@ -30,3 +30,20 @@
+     }
+     Ok(sub(balance, amount_cents))
+ }
++
++#[derive(serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct PaymentReceipt {
++    pub invoice_id: InvoiceId,
++    pub amount_cents: Cents,
++    pub balance_after_cents: Cents,
++}
++
++/// Checks a payment and gives back what it would mean for the invoice. The app stores nothing.
++pub fn record_payment(id: InvoiceId, amount_cents: Cents, method: &str) -> Result<PaymentReceipt, String> {
++    if method.trim().is_empty() {
++        return Err("payment method is missing".to_string());
++    }
++    let left = payment_allowed(id, amount_cents)?;
++    Ok(PaymentReceipt { invoice_id: id, amount_cents, balance_after_cents: left })
++}
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:27
+@@ -4,7 +4,7 @@
+ 
+ use serde::Serialize;
+ use serde_json::{json, Value};
+-use shared::{CustomerId, InvoiceId, ProductId};
++use shared::{Cents, CustomerId, InvoiceId, ProductId};
+ use tiny_http::{Header, Method, Response, Server};
+ 
+ use crate::aging::aging_report;
+@@ -12,7 +12,7 @@
+ use crate::credits::credits_for;
+ use crate::customers::{customer_invoices, get_customer, get_product};
+ use crate::invoices::{get_invoice, invoice_totals};
+-use crate::payments::payments_for;
++use crate::payments::{payments_for, record_payment};
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+ use crate::webhooks::signed_receipt;
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("recordPayment", |a| out(record_payment(InvoiceId(num(a, 0)?), Cents(num(a, 1)?), &text(a, 2)?))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

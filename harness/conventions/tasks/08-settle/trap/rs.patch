@@ -1,0 +1,102 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:40
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "settleResult" => Ok(views::invoice::settle_result(num(a, 0)?, num(a, 1)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:40
+@@ -4,7 +4,7 @@
+ 
+ use serde_json::json;
+ use shared::money::times;
+-use shared::{Customer, Invoice, Product, Receipt, Totals};
++use shared::{Cents, Customer, Invoice, Product, Receipt, Status, Totals};
+ 
+ use crate::format::{discount_note, format_cents, status_word};
+ use crate::rpc::rpc;
+@@ -74,4 +74,20 @@
+         Ok(text) => text,
+         Err(e) => format!("error: {}", e),
+     }
++}
++
++/// The outcome of settling an invoice, as one line.
++pub fn settle_result(invoice_id: i64, amount_cents: i64) -> String {
++    let inv: Invoice = match rpc("settle", &[json!(invoice_id), json!(amount_cents)]) {
++        Ok(v) => v,
++        Err(e) => return format!("error: {}", e),
++    };
++    if inv.status() == Status::Paid {
++        return format!("Invoice #{} paid in full on {}", inv.id.0, inv.paid_on.unwrap_or_default());
++    }
++    let t: Totals = match rpc("invoiceTotals", &[json!(invoice_id)]) {
++        Ok(v) => v,
++        Err(e) => return format!("error: {}", e),
++    };
++    format!("Invoice #{} now has a balance of {}", inv.id.0, format_cents(Cents(t.balance_cents.0 - amount_cents)))
+ }
+diff -ruN -x target -x bin -x out app/server/src/payments.rs rs/server/src/payments.rs
+--- a/server/src/payments.rs	2026-10-10 12:00:46
++++ b/server/src/payments.rs	2026-10-10 12:24:40
+@@ -2,8 +2,9 @@
+ // a new payment of a given size would be accepted.
+ 
+ use shared::money::sub;
+-use shared::{Cents, InvoiceId, Payment, Status};
++use shared::{transition, Cents, Invoice, InvoiceId, Payment, Status};
+ 
++use crate::clock::TODAY;
+ use crate::data::{find_invoice, payments};
+ use crate::invoices::totals_of;
+ 
+@@ -29,4 +30,14 @@
+         return Err("payment exceeds balance".to_string());
+     }
+     Ok(sub(balance, amount_cents))
++}
++
++/// The invoice as it would be after taking a payment: paid when the balance reaches zero. The app stores nothing.
++pub fn settle(id: InvoiceId, amount_cents: Cents) -> Result<Invoice, String> {
++    let inv = find_invoice(id).ok_or_else(|| "no such invoice".to_string())?;
++    let left = payment_allowed(id, amount_cents)?;
++    if left.0 != 0 {
++        return Ok(inv);
++    }
++    Ok(Invoice { status: Status::Paid, paid_on: Some(TODAY.to_string()), ..inv })
+ }
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:40
+@@ -4,7 +4,7 @@
+ 
+ use serde::Serialize;
+ use serde_json::{json, Value};
+-use shared::{CustomerId, InvoiceId, ProductId};
++use shared::{Cents, CustomerId, InvoiceId, ProductId};
+ use tiny_http::{Header, Method, Response, Server};
+ 
+ use crate::aging::aging_report;
+@@ -12,7 +12,7 @@
+ use crate::credits::credits_for;
+ use crate::customers::{customer_invoices, get_customer, get_product};
+ use crate::invoices::{get_invoice, invoice_totals};
+-use crate::payments::payments_for;
++use crate::payments::{payments_for, settle};
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+ use crate::webhooks::signed_receipt;
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("settle", |a| out(settle(InvoiceId(num(a, 0)?), Cents(num(a, 1)?)))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

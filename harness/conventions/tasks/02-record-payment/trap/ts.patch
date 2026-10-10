@@ -1,0 +1,63 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:27
+@@ -2,7 +2,7 @@
+ // the app can show.
+ 
+ export { connect } from './rpc.ts';
+-export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
++export { invoiceView, paymentResult, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
+ export { contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/invoice.ts ts/client/views/invoice.ts
+--- a/client/views/invoice.ts	2026-10-10 11:47:04
++++ b/client/views/invoice.ts	2026-10-10 12:24:27
+@@ -53,3 +53,10 @@
+   if (!r.ok) return 'error: ' + r.error;
+   return r.value;
+ }
++
++/** The outcome of recording a payment, as one line. */
++export async function paymentResult(invoiceId: number, amountCents: number, method: string): Promise<string> {
++  const r = await rpc<{ invoiceId: number; amountCents: number; balanceAfterCents: number }>('recordPayment', [invoiceId, amountCents, method]);
++  if (!r.ok) return 'error: ' + r.error;
++  return `Payment of ${formatCents(r.value.amountCents)} recorded on #${r.value.invoiceId}; balance now ${formatCents(r.value.balanceAfterCents)}`;
++}
+diff -ruN -x target -x bin -x out app/server/payments.ts ts/server/payments.ts
+--- a/server/payments.ts	2026-10-10 11:47:05
++++ b/server/payments.ts	2026-10-10 12:24:27
+@@ -24,3 +24,13 @@
+   if (amountCents > balance) return err('payment exceeds balance');
+   return ok(balance - amountCents);
+ }
++
++export type PaymentReceipt = { invoiceId: InvoiceId; amountCents: Cents; balanceAfterCents: Cents };
++
++/** Checks a payment and gives back what it would mean for the invoice. The app stores nothing. */
++export function recordPayment(id: InvoiceId, amountCents: Cents, method: string): Result<PaymentReceipt, string> {
++  if (method.trim() === '') return err('payment method is missing');
++  const left = paymentAllowed(id, amountCents);
++  if (!left.ok) throw new Error(left.error);
++  return ok({ invoiceId: id, amountCents, balanceAfterCents: left.value });
++}
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:27
+@@ -9,7 +9,7 @@
+ import { creditsFor } from './credits.ts';
+ import { customerInvoices, getCustomer, getProduct } from './customers.ts';
+ import { getInvoice, invoiceTotals } from './invoices.ts';
+-import { paymentsFor } from './payments.ts';
++import { paymentsFor, recordPayment } from './payments.ts';
+ import { reminderText } from './reminders.ts';
+ import { dashboardStats, overdueInvoices } from './reports.ts';
+ import { signedReceipt } from './webhooks.ts';
+@@ -30,6 +30,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  recordPayment: (a) => recordPayment(a[0] as number, a[1] as number, a[2] as string),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */

@@ -1,0 +1,57 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,53 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- revenue by month
++
++type MonthRevenue = { month: string, paidCents: Cents }
++
++server fn revenueByMonth(): Result<List<MonthRevenue>, string> {
++  let mut months: List<string> = [];
++  for (inv in invoices()) {
++    let paidOn = inv.paidOn;
++    if (inv.status == Status.Paid && paidOn !== null) {
++      let month = substring(paidOn, 0, 7);
++      if (!has(months, month)) { months = push(months, month); }
++    }
++  }
++  // oldest month first
++  let mut sorted: List<string> = [];
++  for (step in range(0, len(months))) {
++    let mut best: string | null = null;
++    for (m in months) {
++      if (!has(sorted, m)) {
++        if (best === null) { best = m; }
++        else if (m < best) { best = m; }
++      }
++    }
++    if (best !== null) { sorted = push(sorted, best); }
++  }
++  let mut out: List<MonthRevenue> = [];
++  for (m in sorted) {
++    let mut total = Cents(0);
++    for (inv in invoices()) {
++      let paidOn = inv.paidOn;
++      if (inv.status == Status.Paid && paidOn !== null) {
++        if (substring(paidOn, 0, 7) == m) { total = addCents(total, totalsOf(inv).totalCents); }
++      }
++    }
++    out = push(out, { month: m, paidCents: total });
++  }
++  return ok(out);
++}
++
++client fn revenueView(): string {
++  match revenueByMonth() {
++    ok(ms) => {
++      let mut lines: List<string> = [];
++      for (m in ms) { lines = push(lines, m.month + ": " + formatCents(m.paidCents)); }
++      return join(lines, "\n");
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

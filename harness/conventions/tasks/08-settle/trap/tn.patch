@@ -1,0 +1,38 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:40
+@@ -701,3 +701,34 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- settling an invoice
++
++server fn settle(id: InvoiceId, amountCents: Cents): Result<Invoice, string> {
++  let inv = findInvoice(id);
++  if (inv === null) { return err("no such invoice"); }
++  match paymentAllowed(id, amountCents) {
++    ok(left) => {
++      if (left.value != 0) { return ok(inv); }
++      return ok({ ...inv, status: Status.Paid, paidOn: today() });
++    }
++    err(e) => { return err(e); }
++  }
++}
++
++client fn settleResult(invoiceId: InvoiceId, amountCents: Cents): string {
++  match settle(invoiceId, amountCents) {
++    ok(inv) => {
++      if (inv.status == Status.Paid) {
++        let paidOn = inv.paidOn;
++        if (paidOn === null) { return "Invoice #" + str(inv.id.value) + " paid in full"; }
++        return "Invoice #" + str(inv.id.value) + " paid in full on " + paidOn;
++      }
++      match invoiceTotals(invoiceId) {
++        ok(t) => { return "Invoice #" + str(inv.id.value) + " now has a balance of " + formatCents(subCents(t.balanceCents, amountCents)); }
++        err(e) => { return "error: " + e; }
++      }
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

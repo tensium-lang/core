@@ -1,0 +1,70 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "sendResult" => Ok(views::invoice::send_result(num(a, 0)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:28
+@@ -75,3 +75,11 @@
+         Err(e) => format!("error: {}", e),
+     }
+ }
++
++/// The outcome of sending a draft invoice, as one line.
++pub fn send_result(invoice_id: i64) -> String {
++    match rpc::<Invoice>("sendInvoice", &[json!(invoice_id)]) {
++        Ok(inv) => format!("Invoice #{} sent on {}", inv.id.0, inv.sent_on.unwrap_or_default()),
++        Err(e) => format!("error: {}", e),
++    }
++}
+diff -ruN -x target -x bin -x out app/server/src/invoices.rs rs/server/src/invoices.rs
+--- a/server/src/invoices.rs	2026-10-10 12:00:46
++++ b/server/src/invoices.rs	2026-10-10 12:24:28
+@@ -4,7 +4,7 @@
+ 
+ use shared::dates::{add_days, days_between, is_after};
+ use shared::money::{add, percent_of, sub, sum_cents, times};
+-use shared::{Cents, Invoice, InvoiceId, Status, Totals};
++use shared::{transition, Cents, Invoice, InvoiceId, Status, Totals};
+ 
+ use crate::clock::TODAY;
+ use crate::data::{credit_notes, find_customer, find_invoice, find_product, payments};
+@@ -92,4 +92,11 @@
+         return Err("customer has no email address".to_string());
+     }
+     Ok(())
++}
++
++/// A draft invoice as it would be once sent, if it is complete enough to send. The app stores nothing.
++pub fn send_invoice(id: InvoiceId) -> Result<Invoice, String> {
++    let inv = get_invoice(id)?;
++    ready_to_send(&inv)?;
++    transition(&inv, Status::Sent, TODAY)
+ }
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:28
+@@ -11,7 +11,7 @@
+ use crate::catalog::{customers_in_region, list_products, search_products};
+ use crate::credits::credits_for;
+ use crate::customers::{customer_invoices, get_customer, get_product};
+-use crate::invoices::{get_invoice, invoice_totals};
++use crate::invoices::{get_invoice, invoice_totals, send_invoice};
+ use crate::payments::payments_for;
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("sendInvoice", |a| out(send_invoice(InvoiceId(num(a, 0)?)))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

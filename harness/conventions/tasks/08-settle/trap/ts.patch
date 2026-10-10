@@ -1,0 +1,77 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:40
+@@ -2,7 +2,7 @@
+ // the app can show.
+ 
+ export { connect } from './rpc.ts';
+-export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
++export { invoiceView, productLabel, receiptLine, reminderPreview, settleResult } from './views/invoice.ts';
+ export { contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/invoice.ts ts/client/views/invoice.ts
+--- a/client/views/invoice.ts	2026-10-10 11:47:04
++++ b/client/views/invoice.ts	2026-10-10 12:24:40
+@@ -53,3 +53,13 @@
+   if (!r.ok) return 'error: ' + r.error;
+   return r.value;
+ }
++
++/** The outcome of settling an invoice, as one line. */
++export async function settleResult(invoiceId: number, amountCents: number): Promise<string> {
++  const r = await rpc<Invoice>('settle', [invoiceId, amountCents]);
++  if (!r.ok) return 'error: ' + r.error;
++  if (r.value.status === 'paid') return `Invoice #${r.value.id} paid in full on ${r.value.paidOn}`;
++  const t = await rpc<Totals>('invoiceTotals', [invoiceId]);
++  if (!t.ok) return 'error: ' + t.error;
++  return `Invoice #${r.value.id} now has a balance of ${formatCents(t.value.balanceCents - amountCents)}`;
++}
+diff -ruN -x target -x bin -x out app/server/payments.ts ts/server/payments.ts
+--- a/server/payments.ts	2026-10-10 11:47:05
++++ b/server/payments.ts	2026-10-10 12:24:40
+@@ -1,7 +1,8 @@
+ // Payments on the server: the payments already received for an invoice, and the rules for whether
+ // a new payment of a given size would be accepted.
+ 
+-import type { Cents, InvoiceId, Payment, Result } from '../shared/types.ts';
++import type { Cents, Invoice, InvoiceId, Payment, Result } from '../shared/types.ts';
++import { TODAY } from './clock.ts';
+ import { PAYMENTS, findInvoice } from './data.ts';
+ import { totalsOf } from './invoices.ts';
+ import { err, ok } from './lib/result.ts';
+@@ -23,4 +24,14 @@
+   const balance = totalsOf(inv).balanceCents;
+   if (amountCents > balance) return err('payment exceeds balance');
+   return ok(balance - amountCents);
++}
++
++/** The invoice as it would be after taking a payment: paid when the balance reaches zero. The app stores nothing. */
++export function settle(id: InvoiceId, amountCents: Cents): Result<Invoice, string> {
++  const inv = findInvoice(id);
++  if (inv === null) return err('no such invoice');
++  const left = paymentAllowed(id, amountCents);
++  if (!left.ok) return left;
++  if (left.value !== 0) return ok(inv);
++  return ok({ ...inv, status: 'paid', paidOn: TODAY });
+ }
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:40
+@@ -9,7 +9,7 @@
+ import { creditsFor } from './credits.ts';
+ import { customerInvoices, getCustomer, getProduct } from './customers.ts';
+ import { getInvoice, invoiceTotals } from './invoices.ts';
+-import { paymentsFor } from './payments.ts';
++import { paymentsFor, settle } from './payments.ts';
+ import { reminderText } from './reminders.ts';
+ import { dashboardStats, overdueInvoices } from './reports.ts';
+ import { signedReceipt } from './webhooks.ts';
+@@ -30,6 +30,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  settle: (a) => settle(a[0] as number, a[1] as number),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */

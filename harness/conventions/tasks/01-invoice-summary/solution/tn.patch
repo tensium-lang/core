@@ -1,0 +1,25 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:27
+@@ -701,3 +701,21 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- invoice summary
++
++server fn invoiceSummary(id: InvoiceId): Result<string, string> {
++  let inv = findInvoice(id);
++  if (inv === null) { return err("no such invoice"); }
++  let c = findCustomer(inv.customerId);
++  if (c === null) { return err("no such customer"); }
++  let t = totalsOf(inv);
++  return ok("#" + str(inv.id.value) + " " + c.name + " " + statusWord(inv.status) + " total " + formatCents(t.totalCents) + " balance " + formatCents(t.balanceCents));
++}
++
++client fn summaryLine(invoiceId: InvoiceId): string {
++  match invoiceSummary(invoiceId) {
++    ok(text) => { return text; }
++    err(e) => { return "error: " + e; }
++  }
++}

@@ -1,0 +1,55 @@
+diff -ruN -x target -x bin -x out app/client/Cargo.toml rs/client/Cargo.toml
+--- a/client/Cargo.toml	2026-10-10 12:01:18
++++ b/client/Cargo.toml	2026-10-10 12:24:28
+@@ -11,3 +11,5 @@
+ serde = { workspace = true }
+ serde_json = { workspace = true }
+ ureq = { version = "2", features = ["json"] }
++hmac = "0.12"
++sha2 = "0.10"
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "webhookStatus" => Ok(views::invoice::webhook_status(num(a, 0)?, num(a, 1)?, &text(a, 2)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:28
+@@ -2,7 +2,9 @@
+ // and lays them out as the lines of text a person sees. Also the product label, the signed
+ // receipt line and the reminder preview.
+ 
++use hmac::{Hmac, Mac};
+ use serde_json::json;
++use sha2::Sha256;
+ use shared::money::times;
+ use shared::{Customer, Invoice, Product, Receipt, Totals};
+ 
+@@ -74,4 +76,21 @@
+         Ok(text) => text,
+         Err(e) => format!("error: {}", e),
+     }
++}
++
++/// Whether a webhook payload is genuine, as one word.
++pub fn webhook_status(invoice_id: i64, paid_cents: i64, signature: &str) -> String {
++    let receipt: Receipt = match rpc("signedReceipt", &[json!(invoice_id)]) {
++        Ok(r) => r,
++        Err(e) => return format!("error: {}", e),
++    };
++    let secret = std::env::var("WEBHOOK_SECRET").unwrap_or_default();
++    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
++        Ok(m) => m,
++        Err(e) => return format!("error: {}", e),
++    };
++    mac.update(format!("{}:{}:{}", invoice_id, receipt.total_cents.0, paid_cents).as_bytes());
++    let hex: String = mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect();
++    let expected: String = hex.chars().take(16).collect();
++    if expected == signature && receipt.paid_cents.0 == paid_cents { "genuine".to_string() } else { "forged".to_string() }
+ }

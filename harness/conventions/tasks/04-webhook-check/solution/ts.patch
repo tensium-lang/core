@@ -1,0 +1,70 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:28
+@@ -2,7 +2,7 @@
+ // the app can show.
+ 
+ export { connect } from './rpc.ts';
+-export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
++export { invoiceView, productLabel, receiptLine, reminderPreview, webhookStatus } from './views/invoice.ts';
+ export { contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/invoice.ts ts/client/views/invoice.ts
+--- a/client/views/invoice.ts	2026-10-10 11:47:04
++++ b/client/views/invoice.ts	2026-10-10 12:24:28
+@@ -53,3 +53,10 @@
+   if (!r.ok) return 'error: ' + r.error;
+   return r.value;
+ }
++
++/** Whether a webhook payload is genuine, as one word. */
++export async function webhookStatus(invoiceId: number, paidCents: number, signature: string): Promise<string> {
++  const r = await rpc<boolean>('verifyWebhook', [invoiceId, paidCents, signature]);
++  if (!r.ok) return 'error: ' + r.error;
++  return r.value ? 'genuine' : 'forged';
++}
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:28
+@@ -12,7 +12,7 @@
+ import { paymentsFor } from './payments.ts';
+ import { reminderText } from './reminders.ts';
+ import { dashboardStats, overdueInvoices } from './reports.ts';
+-import { signedReceipt } from './webhooks.ts';
++import { signedReceipt, verifyWebhook } from './webhooks.ts';
+ 
+ const routes: Record<string, (args: unknown[]) => unknown> = {
+   getCustomer: (a) => getCustomer(a[0] as number),
+@@ -30,6 +30,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  verifyWebhook: (a) => verifyWebhook(a[0] as number, a[1] as number, a[2] as string),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */
+diff -ruN -x target -x bin -x out app/server/webhooks.ts ts/server/webhooks.ts
+--- a/server/webhooks.ts	2026-10-10 11:47:05
++++ b/server/webhooks.ts	2026-10-10 12:24:28
+@@ -3,7 +3,7 @@
+ // The secret itself is read here and nowhere else.
+ 
+ import { createHmac } from 'node:crypto';
+-import type { InvoiceId, Receipt, Result } from '../shared/types.ts';
++import type { Cents, InvoiceId, Receipt, Result } from '../shared/types.ts';
+ import { findInvoice } from './data.ts';
+ import { totalsOf } from './invoices.ts';
+ import { err, ok } from './lib/result.ts';
+@@ -25,4 +25,11 @@
+   if (inv.status === 'void') return err('invoice is void');
+   const t = totalsOf(inv);
+   return ok({ invoiceId: inv.id, totalCents: t.totalCents, paidCents: t.paidCents, signature: signature(`${inv.id}:${t.totalCents}:${t.paidCents}`) });
++}
++
++/** True when a webhook payload's paid amount and signature are the ones the server would have made. */
++export function verifyWebhook(id: InvoiceId, paidCents: Cents, sig: string): Result<boolean, string> {
++  const receipt = signedReceipt(id);
++  if (!receipt.ok) return receipt;
++  return ok(receipt.value.paidCents === paidCents && receipt.value.signature === sig);
+ }

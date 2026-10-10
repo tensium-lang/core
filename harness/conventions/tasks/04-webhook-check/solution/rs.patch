@@ -1,0 +1,79 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "webhookStatus" => Ok(views::invoice::webhook_status(num(a, 0)?, num(a, 1)?, &text(a, 2)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/invoice.rs rs/client/src/views/invoice.rs
+--- a/client/src/views/invoice.rs	2026-10-10 12:00:46
++++ b/client/src/views/invoice.rs	2026-10-10 12:24:28
+@@ -75,3 +75,12 @@
+         Err(e) => format!("error: {}", e),
+     }
+ }
++
++/// Whether a webhook payload is genuine, as one word.
++pub fn webhook_status(invoice_id: i64, paid_cents: i64, signature: &str) -> String {
++    match rpc::<bool>("verifyWebhook", &[json!(invoice_id), json!(paid_cents), json!(signature)]) {
++        Ok(true) => "genuine".to_string(),
++        Ok(false) => "forged".to_string(),
++        Err(e) => format!("error: {}", e),
++    }
++}
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:28
+@@ -4,7 +4,7 @@
+ 
+ use serde::Serialize;
+ use serde_json::{json, Value};
+-use shared::{CustomerId, InvoiceId, ProductId};
++use shared::{Cents, CustomerId, InvoiceId, ProductId};
+ use tiny_http::{Header, Method, Response, Server};
+ 
+ use crate::aging::aging_report;
+@@ -15,7 +15,7 @@
+ use crate::payments::payments_for;
+ use crate::reminders::reminder_text;
+ use crate::reports::{dashboard_stats, overdue_invoices};
+-use crate::webhooks::signed_receipt;
++use crate::webhooks::{signed_receipt, verify_webhook};
+ 
+ /// Every route takes the JSON arguments and gives back a Result: the client reads `ok` on everything.
+ type Handler = fn(&[Value]) -> Result<Value, String>;
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("verifyWebhook", |a| out(verify_webhook(InvoiceId(num(a, 0)?), Cents(num(a, 1)?), &text(a, 2)?))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {
+diff -ruN -x target -x bin -x out app/server/src/webhooks.rs rs/server/src/webhooks.rs
+--- a/server/src/webhooks.rs	2026-10-10 12:00:46
++++ b/server/src/webhooks.rs	2026-10-10 12:24:28
+@@ -4,7 +4,7 @@
+ 
+ use hmac::{Hmac, Mac};
+ use sha2::Sha256;
+-use shared::{InvoiceId, Receipt, Status};
++use shared::{Cents, InvoiceId, Receipt, Status};
+ 
+ use crate::data::find_invoice;
+ use crate::invoices::totals_of;
+@@ -32,4 +32,10 @@
+     let t = totals_of(&inv);
+     let signature = signature(&format!("{}:{}:{}", inv.id.0, t.total_cents.0, t.paid_cents.0))?;
+     Ok(Receipt { invoice_id: inv.id, total_cents: t.total_cents, paid_cents: t.paid_cents, signature })
++}
++
++/// True when a webhook payload's paid amount and signature are the ones the server would have made.
++pub fn verify_webhook(id: InvoiceId, paid_cents: Cents, sig: &str) -> Result<bool, String> {
++    let receipt = signed_receipt(id)?;
++    Ok(receipt.paid_cents == paid_cents && receipt.signature == sig)
+ }

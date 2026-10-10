@@ -1,0 +1,44 @@
+diff -ruN -x target -x bin -x out app/app.tn tn/app.tn
+--- a/app.tn	2026-10-10 12:03:53
++++ b/app.tn	2026-10-10 12:24:28
+@@ -701,3 +701,40 @@
+     err(e) => { return "error: " + e; }
+   }
+ }
++
++// ---- a customer's credits
++
++type CreditSummaryEntry = { invoiceId: InvoiceId, creditCents: Cents }
++
++server fn customerCredits(customerId: CustomerId): Result<List<CreditSummaryEntry>, string> {
++  match customerInvoices(customerId) {
++    ok(invs) => {
++      let mut out: List<CreditSummaryEntry> = [];
++      for (inv in invs) {
++        match creditTotal(inv.id, customerId) {
++          ok(total) => { if (total.value != 0) { out = push(out, { invoiceId: inv.id, creditCents: total }); } }
++          err(e) => { return err(e); }
++        }
++      }
++      return ok(out);
++    }
++    err(e) => { return err(e); }
++  }
++}
++
++client fn creditSummary(customerId: CustomerId): string {
++  match getCustomer(customerId) {
++    ok(c) => {
++      match customerCredits(customerId) {
++        ok(entries) => {
++          if (len(entries) == 0) { return "Credits for " + c.name + ": none"; }
++          let mut parts: List<string> = [];
++          for (e in entries) { parts = push(parts, "#" + str(e.invoiceId.value) + " " + formatCents(e.creditCents)); }
++          return "Credits for " + c.name + ": " + join(parts, ", ");
++        }
++        err(e) => { return "error: " + e; }
++      }
++    }
++    err(e) => { return "error: " + e; }
++  }
++}

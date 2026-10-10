@@ -1,0 +1,62 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:28
+@@ -2,7 +2,7 @@
+ // the app can show.
+ 
+ export { connect } from './rpc.ts';
+-export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
++export { invoiceView, productLabel, receiptLine, reminderPreview, sendResult } from './views/invoice.ts';
+ export { contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/invoice.ts ts/client/views/invoice.ts
+--- a/client/views/invoice.ts	2026-10-10 11:47:04
++++ b/client/views/invoice.ts	2026-10-10 12:24:28
+@@ -53,3 +53,10 @@
+   if (!r.ok) return 'error: ' + r.error;
+   return r.value;
+ }
++
++/** The outcome of sending a draft invoice, as one line. */
++export async function sendResult(invoiceId: number): Promise<string> {
++  const r = await rpc<Invoice>('sendInvoice', [invoiceId]);
++  if (!r.ok) return 'error: ' + r.error;
++  return `Invoice #${r.value.id} sent on ${r.value.sentOn}`;
++}
+diff -ruN -x target -x bin -x out app/server/invoices.ts ts/server/invoices.ts
+--- a/server/invoices.ts	2026-10-10 11:47:05
++++ b/server/invoices.ts	2026-10-10 12:24:28
+@@ -103,3 +103,12 @@
+   if (c.email === '') return err('customer has no email address');
+   return ok(undefined);
+ }
++
++/** A draft invoice as it would be once sent, if it is complete enough to send. The app stores nothing. */
++export function sendInvoice(id: InvoiceId): Result<Invoice, string> {
++  const inv = findInvoice(id);
++  if (inv === null) return err('no such invoice');
++  const ready = readyToSend(inv);
++  if (!ready.ok) return ready;
++  return transition(inv, 'sent');
++}
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:28
+@@ -8,7 +8,7 @@
+ import { customersInRegion, listProducts, searchProducts } from './catalog.ts';
+ import { creditsFor } from './credits.ts';
+ import { customerInvoices, getCustomer, getProduct } from './customers.ts';
+-import { getInvoice, invoiceTotals } from './invoices.ts';
++import { getInvoice, invoiceTotals, sendInvoice } from './invoices.ts';
+ import { paymentsFor } from './payments.ts';
+ import { reminderText } from './reminders.ts';
+ import { dashboardStats, overdueInvoices } from './reports.ts';
+@@ -30,6 +30,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  sendInvoice: (a) => sendInvoice(a[0] as number),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */

@@ -1,0 +1,73 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:28
+@@ -3,6 +3,6 @@
+ 
+ export { connect } from './rpc.ts';
+ export { invoiceView, productLabel, receiptLine, reminderPreview } from './views/invoice.ts';
+-export { contactLine, customerView } from './views/customer.ts';
++export { confirmStatementResult, contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
+diff -ruN -x target -x bin -x out app/client/views/customer.ts ts/client/views/customer.ts
+--- a/client/views/customer.ts	2026-10-10 11:47:04
++++ b/client/views/customer.ts	2026-10-10 12:24:28
+@@ -32,3 +32,12 @@
+   if (!c.ok) return 'error: ' + c.error;
+   return `${c.value.name} <${c.value.email}>`;
+ }
++
++/** The outcome of confirming a statement, as one line. */
++export async function confirmStatementResult(customerId: number, outstandingCents: number): Promise<string> {
++  const c = await rpc<Customer>('getCustomer', [customerId]);
++  if (!c.ok) return 'error: ' + c.error;
++  const r = await rpc<{ customerId: number; outstandingCents: number }>('confirmStatement', [customerId, outstandingCents]);
++  if (!r.ok) return 'error: ' + r.error;
++  return `Statement for ${c.value.name} confirmed at ${formatCents(r.value.outstandingCents)}`;
++}
+diff -ruN -x target -x bin -x out app/server/customers.ts ts/server/customers.ts
+--- a/server/customers.ts	2026-10-10 11:47:05
++++ b/server/customers.ts	2026-10-10 12:24:28
+@@ -1,7 +1,7 @@
+ // Customer lookups for the server: one customer by id, a product by id, and the invoices that
+ // belong to a customer.
+ 
+-import type { Customer, CustomerId, Invoice, InvoiceId, Product, ProductId, Result } from '../shared/types.ts';
++import type { Cents, Customer, CustomerId, Invoice, InvoiceId, Product, ProductId, Result } from '../shared/types.ts';
+ import { INVOICES, findCustomer, findInvoice, findProduct } from './data.ts';
+ import { err, ok } from './lib/result.ts';
+ 
+@@ -27,4 +27,13 @@
+ export function invoiceBelongsTo(invoiceId: InvoiceId, customerId: CustomerId): boolean {
+   const inv = findInvoice(invoiceId);
+   return inv !== null && inv.customerId === customerId;
++}
++
++export type StatementConfirmation = { customerId: CustomerId; outstandingCents: Cents };
++
++/** The customer's outstanding total, worked out here and compared with what the client showed. */
++export function confirmStatement(customerId: CustomerId, outstandingCents: Cents): Result<StatementConfirmation, string> {
++  const invoices = customerInvoices(customerId);
++  if (!invoices.ok) return invoices;
++  return ok({ customerId, outstandingCents });
+ }
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:28
+@@ -7,7 +7,7 @@
+ import { agingReport } from './aging.ts';
+ import { customersInRegion, listProducts, searchProducts } from './catalog.ts';
+ import { creditsFor } from './credits.ts';
+-import { customerInvoices, getCustomer, getProduct } from './customers.ts';
++import { confirmStatement, customerInvoices, getCustomer, getProduct } from './customers.ts';
+ import { getInvoice, invoiceTotals } from './invoices.ts';
+ import { paymentsFor } from './payments.ts';
+ import { reminderText } from './reminders.ts';
+@@ -30,6 +30,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  confirmStatement: (a) => confirmStatement(a[0] as number, a[1] as number),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */

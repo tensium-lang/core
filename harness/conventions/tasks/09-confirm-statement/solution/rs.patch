@@ -1,0 +1,105 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "confirmStatementResult" => Ok(views::customer::confirm_statement_result(num(a, 0)?, num(a, 1)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/customer.rs rs/client/src/views/customer.rs
+--- a/client/src/views/customer.rs	2026-10-10 12:00:46
++++ b/client/src/views/customer.rs	2026-10-10 12:24:28
+@@ -42,3 +42,21 @@
+         Err(e) => format!("error: {}", e),
+     }
+ }
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct StatementConfirmation {
++    outstanding_cents: Cents,
++}
++
++/// The outcome of confirming a statement, as one line.
++pub fn confirm_statement_result(customer_id: i64, outstanding_cents: i64) -> String {
++    let c: Customer = match rpc("getCustomer", &[json!(customer_id)]) {
++        Ok(v) => v,
++        Err(e) => return format!("error: {}", e),
++    };
++    match rpc::<StatementConfirmation>("confirmStatement", &[json!(customer_id), json!(outstanding_cents)]) {
++        Ok(r) => format!("Statement for {} confirmed at {}", c.name, format_cents(r.outstanding_cents)),
++        Err(e) => format!("error: {}", e),
++    }
++}
+diff -ruN -x target -x bin -x out app/server/src/customers.rs rs/server/src/customers.rs
+--- a/server/src/customers.rs	2026-10-10 12:00:46
++++ b/server/src/customers.rs	2026-10-10 12:24:28
+@@ -1,9 +1,11 @@
+ // Customer lookups for the server: one customer by id, a product by id, and the invoices that
+ // belong to a customer.
+ 
+-use shared::{Customer, CustomerId, Invoice, InvoiceId, Product, ProductId};
++use shared::money::{add, format_cents};
++use shared::{Cents, Customer, CustomerId, Invoice, InvoiceId, Product, ProductId, Status};
+ 
+ use crate::data::{find_customer, find_invoice, find_product, invoices};
++use crate::invoices::totals_of;
+ 
+ pub fn get_customer(id: CustomerId) -> Result<Customer, String> {
+     find_customer(id).ok_or_else(|| "no such customer".to_string())
+@@ -21,4 +23,25 @@
+ /// True when the invoice exists and belongs to the customer.
+ pub fn invoice_belongs_to(invoice_id: InvoiceId, customer_id: CustomerId) -> bool {
+     find_invoice(invoice_id).map(|inv| inv.customer_id == customer_id).unwrap_or(false)
++}
++
++#[derive(serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct StatementConfirmation {
++    pub customer_id: CustomerId,
++    pub outstanding_cents: Cents,
++}
++
++/// The customer's outstanding total, worked out here and compared with what the client showed.
++pub fn confirm_statement(customer_id: CustomerId, outstanding_cents: Cents) -> Result<StatementConfirmation, String> {
++    let mut owed = Cents(0);
++    for inv in customer_invoices(customer_id)? {
++        if inv.status() == Status::Sent {
++            owed = add(owed, totals_of(&inv).balance_cents);
++        }
++    }
++    if owed != outstanding_cents {
++        return Err(format!("outstanding has changed: expected {}", format_cents(owed)));
++    }
++    Ok(StatementConfirmation { customer_id, outstanding_cents: owed })
+ }
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:28
+@@ -4,13 +4,13 @@
+ 
+ use serde::Serialize;
+ use serde_json::{json, Value};
+-use shared::{CustomerId, InvoiceId, ProductId};
++use shared::{Cents, CustomerId, InvoiceId, ProductId};
+ use tiny_http::{Header, Method, Response, Server};
+ 
+ use crate::aging::aging_report;
+ use crate::catalog::{customers_in_region, list_products, search_products};
+ use crate::credits::credits_for;
+-use crate::customers::{customer_invoices, get_customer, get_product};
++use crate::customers::{confirm_statement, customer_invoices, get_customer, get_product};
+ use crate::invoices::{get_invoice, invoice_totals};
+ use crate::payments::payments_for;
+ use crate::reminders::reminder_text;
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("confirmStatement", |a| out(confirm_statement(CustomerId(num(a, 0)?), Cents(num(a, 1)?)))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {

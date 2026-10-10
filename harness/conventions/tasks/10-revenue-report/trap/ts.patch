@@ -1,0 +1,60 @@
+diff -ruN -x target -x bin -x out app/client/index.ts ts/client/index.ts
+--- a/client/index.ts	2026-10-10 11:47:42
++++ b/client/index.ts	2026-10-10 12:24:28
+@@ -6,3 +6,4 @@
+ export { contactLine, customerView } from './views/customer.ts';
+ export { dashboardView, overdueView } from './views/dashboard.ts';
+ export { agingView, catalogView, regionView, searchView } from './views/catalog.ts';
++export { revenueView } from './views/revenue.ts';
+diff -ruN -x target -x bin -x out app/client/views/revenue.ts ts/client/views/revenue.ts
+--- a/client/views/revenue.ts	1969-12-31 19:00:00
++++ b/client/views/revenue.ts	2026-10-10 12:24:28
+@@ -0,0 +1,8 @@
++import { formatCents } from '../format.ts';
++import { rpc } from '../rpc.ts';
++
++export async function revenueView(): Promise<string> {
++  const r = await rpc<{ month: string; paidCents: number }[]>('revenueByMonth', []);
++  if (!r.ok) return 'error: ' + r.error;
++  return r.value.map((m) => `${m.month}: ${formatCents(m.paidCents)}`).join('\n');
++}
+diff -ruN -x target -x bin -x out app/server/revenue.ts ts/server/revenue.ts
+--- a/server/revenue.ts	1969-12-31 19:00:00
++++ b/server/revenue.ts	2026-10-10 12:24:28
+@@ -0,0 +1,17 @@
++import type { Cents, Result } from '../shared/types.ts';
++import { INVOICES } from './data.ts';
++import { totalsOf } from './invoices.ts';
++import { ok } from './lib/result.ts';
++
++export type MonthRevenue = { month: string; paidCents: Cents };
++
++/** One entry per month with a paid invoice, oldest first. */
++export function revenueByMonth(): Result<MonthRevenue[], string> {
++  const byMonth = new Map<string, Cents>();
++  for (const inv of INVOICES) {
++    if (inv.status !== 'paid' || inv.paidOn === null) continue;
++    const month = inv.paidOn.slice(0, 7);
++    byMonth.set(month, (byMonth.get(month) ?? 0) + totalsOf(inv).totalCents);
++  }
++  return ok([...byMonth.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([month, paidCents]) => ({ month, paidCents })));
++}
+diff -ruN -x target -x bin -x out app/server/rpc.ts ts/server/rpc.ts
+--- a/server/rpc.ts	2026-10-10 11:47:42
++++ b/server/rpc.ts	2026-10-10 12:24:28
+@@ -13,6 +13,7 @@
+ import { reminderText } from './reminders.ts';
+ import { dashboardStats, overdueInvoices } from './reports.ts';
+ import { signedReceipt } from './webhooks.ts';
++import { revenueByMonth } from './revenue.ts';
+ 
+ const routes: Record<string, (args: unknown[]) => unknown> = {
+   getCustomer: (a) => getCustomer(a[0] as number),
+@@ -30,6 +31,7 @@
+   searchProducts: (a) => searchProducts(a[0] as string),
+   customersInRegion: (a) => customersInRegion(a[0] as string),
+   agingReport: () => agingReport(),
++  revenueByMonth: () => revenueByMonth(),
+ };
+ 
+ /** Starts the server (port 0 picks a free port). */

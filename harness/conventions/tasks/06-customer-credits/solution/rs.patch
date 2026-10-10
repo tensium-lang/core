@@ -1,0 +1,108 @@
+diff -ruN -x target -x bin -x out app/client/src/main.rs rs/client/src/main.rs
+--- a/client/src/main.rs	2026-10-10 12:00:46
++++ b/client/src/main.rs	2026-10-10 12:24:28
+@@ -32,6 +32,7 @@
+         "searchView" => Ok(views::catalog::search_view(&text(a, 0)?)),
+         "regionView" => Ok(views::catalog::region_view(&text(a, 0)?)),
+         "agingView" => Ok(views::catalog::aging_view()),
++        "creditSummary" => Ok(views::customer::credit_summary(num(a, 0)?)),
+         _ => Err(format!("no such screen: {}", name)),
+     }
+ }
+diff -ruN -x target -x bin -x out app/client/src/views/customer.rs rs/client/src/views/customer.rs
+--- a/client/src/views/customer.rs	2026-10-10 12:00:46
++++ b/client/src/views/customer.rs	2026-10-10 12:24:28
+@@ -3,7 +3,7 @@
+ 
+ use serde_json::json;
+ use shared::money::add;
+-use shared::{Cents, Customer, Invoice, Status, Totals};
++use shared::{Cents, Customer, Invoice, InvoiceId, Status, Totals};
+ 
+ use crate::format::{format_cents, status_word};
+ use crate::rpc::rpc;
+@@ -41,4 +41,28 @@
+         Ok(c) => format!("{} <{}>", c.name, c.email),
+         Err(e) => format!("error: {}", e),
+     }
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct CreditSummaryEntry {
++    invoice_id: InvoiceId,
++    credit_cents: Cents,
++}
++
++/// "Credits for Fay Wu: #7 $4.29" for a customer.
++pub fn credit_summary(customer_id: i64) -> String {
++    let c: Customer = match rpc("getCustomer", &[json!(customer_id)]) {
++        Ok(v) => v,
++        Err(e) => return format!("error: {}", e),
++    };
++    let credits: Vec<CreditSummaryEntry> = match rpc("customerCredits", &[json!(customer_id)]) {
++        Ok(v) => v,
++        Err(e) => return format!("error: {}", e),
++    };
++    if credits.is_empty() {
++        return format!("Credits for {}: none", c.name);
++    }
++    let parts: Vec<String> = credits.iter().map(|e| format!("#{} {}", e.invoice_id.0, format_cents(e.credit_cents))).collect();
++    format!("Credits for {}: {}", c.name, parts.join(", "))
+ }
+diff -ruN -x target -x bin -x out app/server/src/credits.rs rs/server/src/credits.rs
+--- a/server/src/credits.rs	2026-10-10 12:00:46
++++ b/server/src/credits.rs	2026-10-10 12:24:28
+@@ -3,7 +3,7 @@
+ 
+ use shared::{Cents, CreditNote, CustomerId, InvoiceId};
+ 
+-use crate::customers::invoice_belongs_to;
++use crate::customers::{customer_invoices, invoice_belongs_to};
+ use crate::data::{credit_notes, find_invoice};
+ use crate::invoices::credited_on;
+ 
+@@ -19,4 +19,23 @@
+         return Err("invoice does not belong to customer".to_string());
+     }
+     Ok(credited_on(invoice_id))
++}
++
++#[derive(serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct CreditSummaryEntry {
++    pub invoice_id: InvoiceId,
++    pub credit_cents: Cents,
++}
++
++/// For each of a customer's invoices that has credit notes: the invoice and the total credited.
++pub fn customer_credits(customer_id: CustomerId) -> Result<Vec<CreditSummaryEntry>, String> {
++    let mut out = Vec::new();
++    for inv in customer_invoices(customer_id)? {
++        let total = credit_total(customer_id, inv.id)?;
++        if total.0 != 0 {
++            out.push(CreditSummaryEntry { invoice_id: inv.id, credit_cents: total });
++        }
++    }
++    Ok(out)
+ }
+diff -ruN -x target -x bin -x out app/server/src/rpc.rs rs/server/src/rpc.rs
+--- a/server/src/rpc.rs	2026-10-10 12:00:46
++++ b/server/src/rpc.rs	2026-10-10 12:24:28
+@@ -9,7 +9,7 @@
+ 
+ use crate::aging::aging_report;
+ use crate::catalog::{customers_in_region, list_products, search_products};
+-use crate::credits::credits_for;
++use crate::credits::{credits_for, customer_credits};
+ use crate::customers::{customer_invoices, get_customer, get_product};
+ use crate::invoices::{get_invoice, invoice_totals};
+ use crate::payments::payments_for;
+@@ -50,6 +50,7 @@
+     ("searchProducts", |a| out(search_products(&text(a, 0)?))),
+     ("customersInRegion", |a| out(customers_in_region(&text(a, 0)?))),
+     ("agingReport", |_| out(aging_report())),
++    ("customerCredits", |a| out(customer_credits(CustomerId(num(a, 0)?)))),
+ ];
+ 
+ fn wire(r: Result<Value, String>) -> Value {
