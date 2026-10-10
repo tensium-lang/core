@@ -161,6 +161,7 @@ server fn invoices(): List<Invoice> {
     { id: InvoiceId(15), customerId: CustomerId(7), issuedOn: "2026-02-01", status: Status.Sent, lines: [line(8, 10, 325)], discountPercent: 0, notes: null, sentOn: "2026-02-01", paidOn: null },
     { id: InvoiceId(16), customerId: CustomerId(8), issuedOn: "2026-09-15", status: Status.Sent, lines: [line(5, 2, 4900)], discountPercent: 0, notes: null, sentOn: "2026-09-15", paidOn: null },
     { id: InvoiceId(17), customerId: CustomerId(6), issuedOn: "2026-08-01", status: Status.Sent, lines: [line(6, 1, 799)], discountPercent: 0, notes: null, sentOn: "2026-08-01", paidOn: null },
+    { id: InvoiceId(18), customerId: CustomerId(8), issuedOn: "2026-09-30", status: Status.Draft, lines: [line(12, 0, 1799)], discountPercent: 0, notes: "Quantity to be confirmed", sentOn: null, paidOn: null },
   ];
 }
 

@@ -64,6 +64,7 @@ pub fn invoices() -> Vec<Invoice> {
         Invoice::new(InvoiceId(15), CustomerId(7), "2026-02-01", Status::Sent, vec![line(8, 10, 325)], 0, None, Some("2026-02-01"), None),
         Invoice::new(InvoiceId(16), CustomerId(8), "2026-09-15", Status::Sent, vec![line(5, 2, 4900)], 0, None, Some("2026-09-15"), None),
         Invoice::new(InvoiceId(17), CustomerId(6), "2026-08-01", Status::Sent, vec![line(6, 1, 799)], 0, None, Some("2026-08-01"), None),
+        Invoice::new(InvoiceId(18), CustomerId(8), "2026-09-30", Status::Draft, vec![line(12, 0, 1799)], 0, Some("Quantity to be confirmed"), None, None),
     ]
 }
 

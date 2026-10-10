@@ -47,6 +47,7 @@ export const INVOICES: Invoice[] = [
   { id: 15, customerId: 7, issuedOn: '2026-02-01', status: 'sent', lines: [{ productId: 8, quantity: 10, unitCents: 325 }], discountPercent: 0, notes: null, sentOn: '2026-02-01', paidOn: null },
   { id: 16, customerId: 8, issuedOn: '2026-09-15', status: 'sent', lines: [{ productId: 5, quantity: 2, unitCents: 4900 }], discountPercent: 0, notes: null, sentOn: '2026-09-15', paidOn: null },
   { id: 17, customerId: 6, issuedOn: '2026-08-01', status: 'sent', lines: [{ productId: 6, quantity: 1, unitCents: 799 }], discountPercent: 0, notes: null, sentOn: '2026-08-01', paidOn: null },
+  { id: 18, customerId: 8, issuedOn: '2026-09-30', status: 'draft', lines: [{ productId: 12, quantity: 0, unitCents: 1799 }], discountPercent: 0, notes: 'Quantity to be confirmed', sentOn: null, paidOn: null },
 ];
 
 export const PAYMENTS: Payment[] = [
